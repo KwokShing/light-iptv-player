@@ -1,0 +1,12 @@
+{
+  "name": "light-iptv-player",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": ".downloads\\flutter\\bin\\flutter.bat run -d windows",
+    "build": ".downloads\\flutter\\bin\\flutter.bat build windows",
+    "test": ".downloads\\flutter\\bin\\flutter.bat test",
+    "analyze": ".downloads\\flutter\\bin\\flutter.bat analyze"
+  }
+}

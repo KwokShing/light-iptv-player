@@ -1,0 +1,20 @@
+node_modules
+dist
+dist-ssr
+*.local
+.downloads
+.dart_tool
+.flutter-plugins
+.flutter-plugins-dependencies
+.idea
+build
+*.iml
+
+src-tauri/target
+
+.DS_Store
+Thumbs.db
+
+# M3U playlists
+*.m3u
+*.m3u8
