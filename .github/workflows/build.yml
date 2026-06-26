@@ -1,0 +1,51 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - run: flutter pub get
+
+      - run: flutter build windows --release
+
+      - name: Archive release
+        uses: thedoctor0/zip-release@0.7.6
+        with:
+          type: zip
+          filename: light-iptv-player-windows-x64.zip
+          directory: build/windows/x64/runner/Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: build/windows/x64/runner/Release/light-iptv-player-windows-x64.zip
+
+  release:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/light-iptv-player-windows-x64.zip
+          generate_release_notes: true
