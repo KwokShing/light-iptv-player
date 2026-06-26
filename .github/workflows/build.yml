@@ -34,6 +34,7 @@ jobs:
           path: build/windows/x64/runner/Release/light-iptv-player-windows-x64.zip
 
   release:
+    if: startsWith(github.ref, 'refs/tags/v')
     needs: build-windows
     runs-on: ubuntu-latest
     permissions:
