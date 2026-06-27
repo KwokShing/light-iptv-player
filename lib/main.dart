@@ -266,12 +266,18 @@ class _IptvHomeState extends State<IptvHome> {
     // connection at the end of each segment, which media_kit surfaces as a
     // "completed" event even though more data is available. When that happens
     // while a channel is selected, transparently reconnect and keep playing.
-    completedSubscription = player.stream.completed.listen((completed) {
+    completedSubscription = player.stream.completed.listen((completed) async {
       if (!completed) return;
       if (!mounted || nowPlaying == null || reconnecting) return;
-      // The last good frame was captured during playback (see
-      // _captureRecentFrame); freeze it now so the reload doesn't flash black.
-      setState(() => reconnecting = true);
+      reconnecting = true;
+      // mpv runs with keep-open=yes, so the last frame is still held on the
+      // output here. Grab it once and freeze it so the reload doesn't flash
+      // black. Captured on-demand (not periodically) to avoid playback stutter.
+      await _captureLastFrame();
+      if (!mounted) return;
+      // Ensure the freeze-frame overlay is applied even if capture returned
+      // nothing (reconnecting was set outside of setState above).
+      setState(() {});
       _scheduleReconnect();
     });
     // A successful resume means the previous segment boundary was crossed, so
@@ -285,18 +291,17 @@ class _IptvHomeState extends State<IptvHome> {
     });
     bitrateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _pollBitrate();
-      _captureRecentFrame();
     });
   }
 
-  // Periodically snapshot the current frame while playing so we always have a
-  // recent, non-black image to display during a reconnect. We deliberately do
-  // not call setState here: the captured frame is only shown while reconnecting.
-  Future<void> _captureRecentFrame() async {
-    if (!mounted || nowPlaying == null || reconnecting) return;
+  // Capture the currently displayed frame. mpv holds the last frame at EOF
+  // (keep-open=yes), so calling this at the "completed" event yields a real
+  // image to freeze during the reconnect instead of a black screen.
+  Future<void> _captureLastFrame() async {
     try {
       final frame = await player.screenshot();
-      if (frame != null) lastFrame = frame;
+      if (!mounted || frame == null) return;
+      lastFrame = frame;
     } catch (_) {}
   }
 
