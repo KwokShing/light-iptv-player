@@ -285,12 +285,19 @@ class _IptvHomeState extends State<IptvHome> {
           if (mounted) setState(() => updateProgress = progress);
         },
       );
-      // Remember which release we're moving to so we don't re-prompt for it.
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString(installedTagStorageKey, release.tag);
-      // Stop playback and release file handles before the swap.
-      await player.stop();
-      await UpdateService.applyAndRestart(zip);
+      if (!mounted) return;
+      setState(() {
+        updating = false;
+        updateProgress = null;
+        availableUpdate = null;
+      });
+      // The zip is saved next to the executable; open Explorer with it
+      // selected so the user can extract it over the current install.
+      await UpdateService.revealInExplorer(zip);
+      _showMessage(
+        'Update downloaded to ${zip.path}. Close the app, then extract the '
+        'zip and replace the existing files.',
+      );
     } catch (error) {
       if (!mounted) return;
       setState(() => updating = false);
@@ -998,7 +1005,7 @@ class _IptvHomeState extends State<IptvHome> {
                   ),
                 ] else if (!updating)
                   const Text(
-                    'The app will restart automatically after updating.',
+                    'The update zip will be saved to the app folder for you to install.',
                     style: TextStyle(color: Color(0xff7d8490), fontSize: 12),
                   ),
               ],
@@ -1020,7 +1027,7 @@ class _IptvHomeState extends State<IptvHome> {
             FilledButton.icon(
               onPressed: _startUpdate,
               icon: const Icon(Icons.download),
-              label: const Text('Update now'),
+              label: const Text('Download'),
             ),
           ],
         ],

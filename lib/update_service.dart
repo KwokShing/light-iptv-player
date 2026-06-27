@@ -34,9 +34,9 @@ class ReleaseInfo {
   final bool prerelease;
 }
 
-/// Handles checking GitHub for a newer release (including pre-releases),
-/// downloading it, and swapping the running installation in place via a
-/// detached PowerShell helper.
+/// Handles checking GitHub for a newer release (including pre-releases) and
+/// downloading the Windows zip into the application's root directory so the
+/// user can extract it over the existing install.
 class UpdateService {
   static const String owner = 'KwokShing';
   static const String repo = 'light-iptv-player';
@@ -122,8 +122,9 @@ class UpdateService {
     return false;
   }
 
-  /// Downloads [url] to a temp file, reporting progress in 0..1 when the
-  /// content length is known.
+  /// Downloads [url] into the application's root directory (the folder that
+  /// contains the running executable), saved as [assetName], and returns the
+  /// saved file. Progress is reported in 0..1 when the content length is known.
   static Future<File> download(
     String url, {
     void Function(double progress)? onProgress,
@@ -138,7 +139,8 @@ class UpdateService {
       }
 
       final total = response.contentLength ?? 0;
-      final file = File('${Directory.systemTemp.path}\\$assetName');
+      final installDir = File(Platform.resolvedExecutable).parent.path;
+      final file = File('$installDir\\$assetName');
       final sink = file.openWrite();
       var received = 0;
       await for (final chunk in response.stream) {
@@ -153,92 +155,11 @@ class UpdateService {
     }
   }
 
-  /// Writes a detached PowerShell script that waits for this process to exit,
-  /// overwrites the install directory with the downloaded zip contents using
-  /// robocopy, and relaunches the app. Then quits the current app so its files
-  /// can be replaced. A log is written to %TEMP%\light-iptv-player-update.log.
-  static Future<void> applyAndRestart(File zip) async {
-    final exePath = Platform.resolvedExecutable;
-    final installDir = File(exePath).parent.path;
-    final scriptPath =
-        '${Directory.systemTemp.path}\\light-iptv-player-update.ps1';
-
-    await File(scriptPath).writeAsString(_updaterScript);
-
-    await Process.start(
-      'powershell.exe',
-      [
-        '-ExecutionPolicy',
-        'Bypass',
-        '-NoProfile',
-        '-WindowStyle',
-        'Hidden',
-        '-File',
-        scriptPath,
-        '-AppPid',
-        '$pid',
-        '-Zip',
-        zip.path,
-        '-Dest',
-        installDir,
-        '-Exe',
-        exePath,
-      ],
-      mode: ProcessStartMode.detached,
-    );
-
-    // Give the detached helper a moment to spin up before we exit so it can
-    // start waiting on our PID.
-    await Future<void>.delayed(const Duration(milliseconds: 500));
-    exit(0);
+  /// Opens Windows Explorer with the downloaded zip selected so the user can
+  /// extract it over the installation. Best-effort; failures are ignored.
+  static Future<void> revealInExplorer(File file) async {
+    try {
+      await Process.start('explorer.exe', ['/select,${file.path}']);
+    } catch (_) {}
   }
-
-  static const String _updaterScript = r'''
-param(
-  [int]$AppPid,
-  [string]$Zip,
-  [string]$Dest,
-  [string]$Exe
-)
-
-$log = Join-Path $env:TEMP 'light-iptv-player-update.log'
-function Write-Log($message) {
-  "$(Get-Date -Format o)  $message" | Out-File -FilePath $log -Append -Encoding utf8
-}
-
-Write-Log "Updater started. Pid=$AppPid Zip=$Zip Dest=$Dest Exe=$Exe"
-
-# Wait for the running app to fully exit so its files are no longer locked.
-try { Wait-Process -Id $AppPid -Timeout 30 -ErrorAction SilentlyContinue } catch {}
-Start-Sleep -Milliseconds 1000
-
-$extract = Join-Path $env:TEMP 'light-iptv-player-update-extract'
-if (Test-Path $extract) { Remove-Item -Recurse -Force $extract }
-
-try {
-  Write-Log "Expanding $Zip"
-  Expand-Archive -Path $Zip -DestinationPath $extract -Force
-
-  # If the archive nested everything under a single folder, descend into it.
-  $items = @(Get-ChildItem -Path $extract)
-  if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-    $source = $items[0].FullName
-  } else {
-    $source = $extract
-  }
-
-  Write-Log "Copying from $source to $Dest"
-  robocopy $source $Dest /E /R:3 /W:1 /NFL /NDL /NJH /NJS | Out-Null
-  Write-Log "robocopy exit code: $LASTEXITCODE"
-
-  Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
-  Remove-Item -Force $Zip -ErrorAction SilentlyContinue
-} catch {
-  Write-Log "ERROR: $_"
-}
-
-Write-Log "Restarting $Exe"
-Start-Process -FilePath $Exe -WorkingDirectory $Dest
-Write-Log "Updater finished"
-''';
 }
