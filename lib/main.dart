@@ -9,8 +9,11 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
+
+import 'update_service.dart';
 
 const sourcesStorageKey = 'light-iptv-player:sources:flutter:v1';
 const allChannels = 'All Channels';
@@ -209,6 +212,11 @@ class _IptvHomeState extends State<IptvHome> {
   static const int _maxReconnectAttempts = 30;
   int playbackRequest = 0;
 
+  // Auto-update state.
+  ReleaseInfo? availableUpdate;
+  bool updating = false;
+  double? updateProgress;
+
   @override
   void initState() {
     super.initState();
@@ -217,6 +225,47 @@ class _IptvHomeState extends State<IptvHome> {
     videoController = engine.$2;
     _listenPlaybackInfo();
     _loadSources();
+    _checkForUpdate();
+  }
+
+  Future<void> _checkForUpdate() async {
+    // Updating in place is only implemented for the Windows build.
+    if (!Platform.isWindows) return;
+    try {
+      final release = await UpdateService.fetchLatestRelease();
+      if (release == null || !mounted) return;
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      if (UpdateService.isNewer(release.version, info.version)) {
+        setState(() => availableUpdate = release);
+      }
+    } catch (error) {
+      debugPrint('Update check failed: $error');
+    }
+  }
+
+  Future<void> _startUpdate() async {
+    final release = availableUpdate;
+    if (release == null || updating) return;
+    setState(() {
+      updating = true;
+      updateProgress = null;
+    });
+    try {
+      final zip = await UpdateService.download(
+        release.zipUrl,
+        onProgress: (progress) {
+          if (mounted) setState(() => updateProgress = progress);
+        },
+      );
+      // Stop playback and release file handles before the swap.
+      await player.stop();
+      await UpdateService.applyAndRestart(zip);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => updating = false);
+      _showMessage('Update failed: $error');
+    }
   }
 
   @override
@@ -836,6 +885,7 @@ class _IptvHomeState extends State<IptvHome> {
               ],
             ),
           ),
+          if (availableUpdate != null) _buildUpdateBanner(),
           Expanded(
             child: sources.isEmpty
                 ? const Center(
@@ -862,6 +912,74 @@ class _IptvHomeState extends State<IptvHome> {
                     itemCount: sources.length,
                   ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildUpdateBanner() {
+    final release = availableUpdate!;
+    final progressPercent = updateProgress == null
+        ? null
+        : (updateProgress! * 100).clamp(0, 100).toStringAsFixed(0);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xffeef0ff),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xffc7c2ff)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.system_update, color: Color(0xff6b5bff)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  updating
+                      ? (progressPercent == null
+                            ? 'Downloading update...'
+                            : 'Downloading update... $progressPercent%')
+                      : 'New version ${release.tag} available',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                if (updating && updateProgress != null) ...[
+                  const SizedBox(height: 6),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(4),
+                    child: LinearProgressIndicator(value: updateProgress),
+                  ),
+                ] else if (!updating)
+                  const Text(
+                    'The app will restart automatically after updating.',
+                    style: TextStyle(color: Color(0xff7d8490), fontSize: 12),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          if (updating)
+            const SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else ...[
+            TextButton(
+              onPressed: () => setState(() => availableUpdate = null),
+              child: const Text('Later'),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: _startUpdate,
+              icon: const Icon(Icons.download),
+              label: const Text('Update now'),
+            ),
+          ],
         ],
       ),
     );
