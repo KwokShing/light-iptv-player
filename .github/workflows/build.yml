@@ -1,9 +1,8 @@
 name: Build and Release
 
+# Triggers on every push and on manual runs from the Actions tab.
 on:
   push:
-    tags:
-      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -52,7 +51,12 @@ jobs:
           path: build/windows/x64/runner/Release/
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Publish a release for version tags, pushes to main (dev pre-releases),
+    # and manual runs. Other branch pushes only build the artifact above.
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      github.ref == 'refs/heads/main' ||
+      github.event_name == 'workflow_dispatch'
     needs: build-windows
     runs-on: ubuntu-latest
     permissions:
