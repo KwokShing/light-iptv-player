@@ -189,7 +189,13 @@ class _IptvHomeState extends State<IptvHome> {
   Track selectedTrack = const Track();
   StreamSubscription<VideoParams>? videoParamsSubscription;
   StreamSubscription<Track>? trackSubscription;
+  StreamSubscription<bool>? completedSubscription;
+  StreamSubscription<bool>? playingSubscription;
   Timer? bitrateTimer;
+  Timer? reconnectTimer;
+  int reconnectAttempts = 0;
+  bool reconnecting = false;
+  Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
   bool hwdecEnabled = true;
@@ -197,6 +203,10 @@ class _IptvHomeState extends State<IptvHome> {
   bool fullscreen = false;
   bool fullscreenChanging = false;
   bool loading = true;
+  // Maximum consecutive reconnect attempts before giving up. Reset to zero
+  // whenever playback successfully resumes, so long-running segmented streams
+  // can reconnect indefinitely as long as each reconnect eventually plays.
+  static const int _maxReconnectAttempts = 30;
   int playbackRequest = 0;
 
   @override
@@ -213,7 +223,10 @@ class _IptvHomeState extends State<IptvHome> {
   void dispose() {
     videoParamsSubscription?.cancel();
     trackSubscription?.cancel();
+    completedSubscription?.cancel();
+    playingSubscription?.cancel();
     bitrateTimer?.cancel();
+    reconnectTimer?.cancel();
     streamUrlController.dispose();
     channelScrollController.dispose();
     player.dispose();
@@ -249,9 +262,42 @@ class _IptvHomeState extends State<IptvHome> {
       );
       setState(() => selectedTrack = track);
     });
+    // Some IPTV streams are delivered in segments: the server closes the
+    // connection at the end of each segment, which media_kit surfaces as a
+    // "completed" event even though more data is available. When that happens
+    // while a channel is selected, transparently reconnect and keep playing.
+    completedSubscription = player.stream.completed.listen((completed) {
+      if (!completed) return;
+      if (!mounted || nowPlaying == null || reconnecting) return;
+      // The last good frame was captured during playback (see
+      // _captureRecentFrame); freeze it now so the reload doesn't flash black.
+      setState(() => reconnecting = true);
+      _scheduleReconnect();
+    });
+    // A successful resume means the previous segment boundary was crossed, so
+    // clear the failure counter and drop the freeze-frame overlay.
+    playingSubscription = player.stream.playing.listen((playing) {
+      if (!playing || !mounted) return;
+      reconnectAttempts = 0;
+      if (reconnecting) {
+        setState(() => reconnecting = false);
+      }
+    });
     bitrateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _pollBitrate();
+      _captureRecentFrame();
     });
+  }
+
+  // Periodically snapshot the current frame while playing so we always have a
+  // recent, non-black image to display during a reconnect. We deliberately do
+  // not call setState here: the captured frame is only shown while reconnecting.
+  Future<void> _captureRecentFrame() async {
+    if (!mounted || nowPlaying == null || reconnecting) return;
+    try {
+      final frame = await player.screenshot();
+      if (frame != null) lastFrame = frame;
+    } catch (_) {}
   }
 
   Future<void> _pollBitrate() async {
@@ -539,6 +585,10 @@ class _IptvHomeState extends State<IptvHome> {
 
   Future<void> _play(Channel channel) async {
     final request = ++playbackRequest;
+    reconnectTimer?.cancel();
+    reconnecting = false;
+    reconnectAttempts = 0;
+    lastFrame = null;
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
     setState(() {
@@ -553,8 +603,58 @@ class _IptvHomeState extends State<IptvHome> {
     await player.open(Media(channel.url));
   }
 
+  void _scheduleReconnect() {
+    // reconnecting is set true by the caller; only guard channel/attempt limits.
+    if (nowPlaying == null) return;
+    if (reconnectAttempts >= _maxReconnectAttempts) {
+      debugPrint('Reconnect: giving up after $reconnectAttempts attempts');
+      if (mounted) setState(() => reconnecting = false);
+      return;
+    }
+    reconnectAttempts++;
+    final request = playbackRequest;
+    // Reconnect quickly on the first try (segment gap), then back off if the
+    // stream is genuinely struggling, capped at 5s.
+    final delay = reconnectAttempts <= 1
+        ? const Duration(milliseconds: 200)
+        : Duration(seconds: reconnectAttempts.clamp(1, 5));
+    reconnectTimer?.cancel();
+    reconnectTimer = Timer(delay, () {
+      _reconnectStream(request);
+    });
+  }
+
+  Future<void> _reconnectStream(int request) async {
+    final channel = nowPlaying;
+    // Abort if playback was stopped or another channel was opened meanwhile.
+    if (!mounted || channel == null || request != playbackRequest) {
+      reconnecting = false;
+      return;
+    }
+    debugPrint(
+      'Reconnecting stream (attempt $reconnectAttempts): ${channel.url}',
+    );
+    try {
+      await _applyPlaybackOptions();
+      if (!mounted || request != playbackRequest) return;
+      // Keep reconnecting=true (freeze frame stays up) until the playing event
+      // confirms the new segment is rendering.
+      await player.open(Media(channel.url));
+    } catch (error) {
+      debugPrint('Reconnect failed: $error');
+      // Retry with backoff while the freeze frame remains on screen.
+      if (mounted && request == playbackRequest) {
+        _scheduleReconnect();
+      }
+    }
+  }
+
   Future<void> _stopPlayback() async {
     playbackRequest++;
+    reconnectTimer?.cancel();
+    reconnecting = false;
+    reconnectAttempts = 0;
+    lastFrame = null;
     streamUrlController.clear();
     try {
       await player.stop();
@@ -845,14 +945,30 @@ class _IptvHomeState extends State<IptvHome> {
                         child: Center(
                           child: AspectRatio(
                             aspectRatio: _videoAspectRatio,
-                            child: Video(
-                              controller: videoController,
-                              fit: BoxFit.contain,
-                              controls: NoVideoControls,
-                              subtitleViewConfiguration:
-                                  const SubtitleViewConfiguration(
-                                    visible: false,
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Video(
+                                  controller: videoController,
+                                  fit: BoxFit.contain,
+                                  controls: NoVideoControls,
+                                  subtitleViewConfiguration:
+                                      const SubtitleViewConfiguration(
+                                        visible: false,
+                                      ),
+                                ),
+                                // Hold the last decoded frame over the video
+                                // while reconnecting so a segmented stream
+                                // doesn't flash black between segments.
+                                if (reconnecting && lastFrame != null)
+                                  Positioned.fill(
+                                    child: Image.memory(
+                                      lastFrame!,
+                                      fit: BoxFit.contain,
+                                      gaplessPlayback: true,
+                                    ),
                                   ),
+                              ],
                             ),
                           ),
                         ),
@@ -1572,28 +1688,6 @@ class _Sidebar extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 20),
-          const Row(
-            children: [
-              _Logo(size: 46),
-              SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Light IPTV Player',
-                      style: TextStyle(fontWeight: FontWeight.w900),
-                    ),
-                    Text(
-                      'MPV playback shell',
-                      style: TextStyle(color: Color(0xff7d8490)),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 22),
           TextField(
             onChanged: onSearch,
             decoration: const InputDecoration(
