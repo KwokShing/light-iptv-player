@@ -206,8 +206,10 @@ class _IptvHomeState extends State<IptvHome> {
   Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
-  bool hwdecEnabled = true;
   String? hwdecCurrent;
+  // Whether interpolation has already been decided for the current stream.
+  // Reset on every (re)open; set once the real source frame rate is known.
+  bool _interpolationConfigured = false;
   bool fullscreen = false;
   bool fullscreenChanging = false;
   bool loading = true;
@@ -320,7 +322,7 @@ class _IptvHomeState extends State<IptvHome> {
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
-        hwdec: 'auto-safe',
+        hwdec: 'auto',
         enableHardwareAcceleration: true,
       ),
     );
@@ -401,10 +403,13 @@ class _IptvHomeState extends State<IptvHome> {
         videoBitrate = parsedBitrate;
         containerFps = parsedFps;
         hwdecCurrent = hwdecValue;
-        if (hwdecValue != null && hwdecValue.isNotEmpty && hwdecValue != 'no') {
-          hwdecEnabled = true;
-        }
       });
+      // Once mpv reports the real source frame rate, decide interpolation
+      // automatically (one time per stream).
+      if (!_interpolationConfigured && parsedFps != null && parsedFps > 0) {
+        _interpolationConfigured = true;
+        await _applyInterpolationForFps(parsedFps);
+      }
     } catch (_) {}
   }
 
@@ -796,11 +801,15 @@ class _IptvHomeState extends State<IptvHome> {
     final platform = player.platform;
     if (platform == null) return;
 
+    // Low-latency baseline. Motion interpolation stays OFF here and is enabled
+    // later, automatically, only for low-frame-rate sources once the real fps
+    // is known (see _applyInterpolationForFps). Interpolation + display-resample
+    // are very expensive at 4K60 and noticeably delay first frame.
+    _interpolationConfigured = false;
     final options = {
-      'video-sync': 'display-resample',
-      'interpolation': 'yes',
-      'tscale': 'oversample',
-      'hwdec': hwdecEnabled ? 'auto-safe' : 'no',
+      'hwdec': 'auto',
+      'interpolation': 'no',
+      'video-sync': 'audio',
     };
 
     for (final option in options.entries) {
@@ -820,23 +829,29 @@ class _IptvHomeState extends State<IptvHome> {
     } catch (_) {}
   }
 
-  Future<void> _toggleHwdec() async {
-    final next = !hwdecEnabled;
-    setState(() => hwdecEnabled = next);
+  // Motion interpolation (frame doubling) only helps low-frame-rate sources
+  // such as 24/25/30 fps content on a 60 Hz+ display. For 50/60 fps sources it
+  // adds heavy GPU load and startup latency — especially at 4K — without any
+  // visible benefit, so it is left off. Called once per stream after mpv
+  // reports the real source frame rate.
+  Future<void> _applyInterpolationForFps(double fps) async {
     final platform = player.platform;
-    if (platform == null) {
-      debugPrint('HW toggle: platform is null');
-      return;
-    }
+    if (platform == null) return;
+    final enable = fps > 0 && fps < 40;
     try {
-      final value = next ? 'auto-safe' : 'no';
-      debugPrint('HW toggle: setting hwdec=$value');
-      await (platform as dynamic).setProperty('hwdec', value);
-      final current =
-          await (platform as dynamic).getProperty('hwdec-current') as String?;
-      debugPrint('HW toggle: hwdec-current=$current');
+      await (platform as dynamic)
+          .setProperty('video-sync', enable ? 'display-resample' : 'audio');
+      await (platform as dynamic)
+          .setProperty('interpolation', enable ? 'yes' : 'no');
+      if (enable) {
+        await (platform as dynamic).setProperty('tscale', 'oversample');
+      }
+      debugPrint(
+        'Interpolation ${enable ? 'enabled' : 'disabled'} '
+        'for ${fps.toStringAsFixed(3)} fps',
+      );
     } catch (e) {
-      debugPrint('HW toggle failed: $e');
+      debugPrint('Failed to apply interpolation: $e');
     }
   }
 
@@ -1131,8 +1146,10 @@ class _IptvHomeState extends State<IptvHome> {
                       streamUrlController: streamUrlController,
                       nowPlaying: nowPlaying,
                       playbackInfo: playbackInfo,
-                      hwdecEnabled: hwdecEnabled,
-                      onToggleHwdec: _toggleHwdec,
+                      hwActive:
+                          hwdecCurrent != null &&
+                          hwdecCurrent!.isNotEmpty &&
+                          hwdecCurrent != 'no',
                       onReplay: nowPlaying == null
                           ? null
                           : () => _play(nowPlaying!),
@@ -1158,16 +1175,14 @@ class _PlaybackControls extends StatelessWidget {
     required this.streamUrlController,
     required this.nowPlaying,
     required this.playbackInfo,
-    required this.hwdecEnabled,
-    required this.onToggleHwdec,
+    required this.hwActive,
     required this.onReplay,
   });
 
   final TextEditingController streamUrlController;
   final Channel? nowPlaying;
   final String playbackInfo;
-  final bool hwdecEnabled;
-  final VoidCallback onToggleHwdec;
+  final bool hwActive;
   final VoidCallback? onReplay;
 
   @override
@@ -1244,28 +1259,25 @@ class _PlaybackControls extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  GestureDetector(
-                    onTap: onToggleHwdec,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 3,
-                      ),
-                      decoration: BoxDecoration(
-                        color: hwdecEnabled
-                            ? const Color(0x1a8357f7)
-                            : const Color(0xffe8e8e8),
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                      child: Text(
-                        hwdecEnabled ? 'HW' : 'SW',
-                        style: TextStyle(
-                          color: hwdecEnabled
-                              ? const Color(0xff8357f7)
-                              : const Color(0xff7d8490),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                        ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: hwActive
+                          ? const Color(0x1a8357f7)
+                          : const Color(0xffe8e8e8),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      hwActive ? 'HW' : 'SW',
+                      style: TextStyle(
+                        color: hwActive
+                            ? const Color(0xff8357f7)
+                            : const Color(0xff7d8490),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
                   ),
