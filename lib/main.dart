@@ -16,8 +16,13 @@ import 'package:window_manager/window_manager.dart';
 import 'update_service.dart';
 
 const sourcesStorageKey = 'light-iptv-player:sources:flutter:v1';
+const installedTagStorageKey = 'light-iptv-player:installed-tag:v1';
 const allChannels = 'All Channels';
 const ungroupedGroup = 'Ungrouped';
+
+/// The git tag this build was released under, injected at build time via
+/// `--dart-define=RELEASE_TAG=...`. Empty for local/dev builds.
+const releaseTag = String.fromEnvironment('RELEASE_TAG');
 const fullscreenAnimationDuration = Duration(milliseconds: 180);
 const fullscreenAnimationCurve = Curves.easeOutCubic;
 
@@ -234,9 +239,29 @@ class _IptvHomeState extends State<IptvHome> {
     try {
       final release = await UpdateService.fetchLatestRelease();
       if (release == null || !mounted) return;
-      final info = await PackageInfo.fromPlatform();
-      if (!mounted) return;
-      if (UpdateService.isNewer(release.version, info.version)) {
+
+      final prefs = await SharedPreferences.getInstance();
+      final currentTag = releaseTag.isNotEmpty
+          ? releaseTag
+          : (prefs.getString(installedTagStorageKey) ?? '');
+
+      final bool isUpdate;
+      if (currentTag.isNotEmpty) {
+        // We know exactly which release we're running; the list endpoint
+        // returns the newest release first, so anything different is an update.
+        isUpdate = release.tag != currentTag;
+      } else {
+        // Unknown build identity (e.g. a build made before this feature):
+        // fall back to semantic version comparison for proper releases, and
+        // always surface pre-releases since their tags aren't semver.
+        final info = await PackageInfo.fromPlatform();
+        if (!mounted) return;
+        isUpdate = release.prerelease
+            ? true
+            : UpdateService.isNewer(release.version, info.version);
+      }
+
+      if (isUpdate && mounted) {
         setState(() => availableUpdate = release);
       }
     } catch (error) {
@@ -258,6 +283,9 @@ class _IptvHomeState extends State<IptvHome> {
           if (mounted) setState(() => updateProgress = progress);
         },
       );
+      // Remember which release we're moving to so we don't re-prompt for it.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(installedTagStorageKey, release.tag);
       // Stop playback and release file handles before the swap.
       await player.stop();
       await UpdateService.applyAndRestart(zip);

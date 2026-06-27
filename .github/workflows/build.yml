@@ -9,6 +9,10 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      relname: ${{ steps.meta.outputs.relname }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
 
@@ -18,17 +22,28 @@ jobs:
 
       - run: flutter pub get
 
-      - name: Resolve build name
-        id: bn
+      - name: Determine release metadata
+        id: meta
         shell: bash
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            echo "name=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "buildname=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+            echo "relname=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
           else
-            echo "name=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            TAG="dev-$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "buildname=0.0.0-dev" >> "$GITHUB_OUTPUT"
+            echo "relname=Dev build $TAG" >> "$GITHUB_OUTPUT"
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - run: flutter build windows --release --build-name=${{ steps.bn.outputs.name }}
+      - name: Build Windows
+        run: >
+          flutter build windows --release
+          --build-name=${{ steps.meta.outputs.buildname }}
+          --dart-define=RELEASE_TAG=${{ steps.meta.outputs.tag }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -52,24 +67,11 @@ jobs:
       - name: Zip for release
         run: cd release-files && zip -r ../light-iptv-player-windows-x64.zip .
 
-      - name: Determine release metadata
-        id: meta
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "tag=dev-$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-            echo "name=Dev build ${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: ${{ steps.meta.outputs.name }}
-          prerelease: ${{ steps.meta.outputs.prerelease }}
+          tag_name: ${{ needs.build-windows.outputs.tag }}
+          name: ${{ needs.build-windows.outputs.relname }}
+          prerelease: ${{ needs.build-windows.outputs.prerelease }}
           files: light-iptv-player-windows-x64.zip
           generate_release_notes: true
