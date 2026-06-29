@@ -2245,9 +2245,17 @@ class _ChannelLogo extends StatelessWidget {
   final String? url;
   final bool load;
 
+  // URLs whose logo has already been fetched + decoded this session. Such
+  // logos live in the in-memory ImageCache, so we render them immediately even
+  // while scrolling (painting from memory is cheap and never re-downloads).
+  // Only brand-new logos are deferred until scrolling settles, to avoid the
+  // download/decode storm that froze big drags.
+  static final Set<String> _loadedUrls = <String>{};
+
   @override
   Widget build(BuildContext context) {
     final hasLogo = url != null && url!.isNotEmpty;
+    final alreadyLoaded = hasLogo && _loadedUrls.contains(url);
     return Container(
       width: 46,
       height: 46,
@@ -2256,7 +2264,7 @@ class _ChannelLogo extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       clipBehavior: Clip.antiAlias,
-      child: !hasLogo || !load
+      child: !hasLogo || (!load && !alreadyLoaded)
           ? const Icon(Icons.tv, color: Color(0xff8c94a1))
           : Padding(
               padding: const EdgeInsets.all(5),
@@ -2270,6 +2278,13 @@ class _ChannelLogo extends StatelessWidget {
                 cacheHeight: 96,
                 filterQuality: FilterQuality.low,
                 gaplessPlayback: true,
+                // Remember which logos have rendered so we can show them
+                // instantly on future scrolls instead of waiting for the
+                // post-scroll load delay.
+                frameBuilder: (context, child, frame, wasSynchronouslyLoaded) {
+                  if (frame != null) _loadedUrls.add(url!);
+                  return child;
+                },
                 errorBuilder: (_, _, _) =>
                     const Icon(Icons.tv, color: Color(0xff8c94a1)),
               ),
