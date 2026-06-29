@@ -25,10 +25,17 @@ const ungroupedGroup = 'Ungrouped';
 const releaseTag = String.fromEnvironment('RELEASE_TAG');
 const fullscreenAnimationDuration = Duration(milliseconds: 180);
 const fullscreenAnimationCurve = Curves.easeOutCubic;
+// Fixed height of a channel row, including its bottom divider. Sized to fit a
+// two-line channel name plus the group label without overflow.
+const _channelRowHeight = 78.0;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   _filterNoisyDebugLogs();
+  // Keep more decoded logos resident so scrolling back through a long channel
+  // list doesn't re-download and re-decode images it already showed.
+  PaintingBinding.instance.imageCache.maximumSize = 2000;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 128 * 1024 * 1024;
   MediaKit.ensureInitialized();
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
@@ -1970,7 +1977,7 @@ class _Sidebar extends StatelessWidget {
   }
 }
 
-class _ChannelList extends StatelessWidget {
+class _ChannelList extends StatefulWidget {
   const _ChannelList({
     required this.title,
     required this.channels,
@@ -1986,7 +1993,70 @@ class _ChannelList extends StatelessWidget {
   final ValueChanged<Channel> onPlay;
 
   @override
+  State<_ChannelList> createState() => _ChannelListState();
+}
+
+class _ChannelListState extends State<_ChannelList> {
+  // Names that appear on more than one channel get a "routes" tag. Computed
+  // once whenever the channel list changes instead of rescanning the entire
+  // list inside every visible tile (which made large playlists freeze while
+  // scrolling).
+  late Set<String> _duplicateNames;
+
+  // Logos are remote images. Loading them for every tile that flies past
+  // during a fast scroll spawns a storm of HTTP requests + decodes that
+  // freezes the UI. So we only load logos once scrolling has settled.
+  bool _scrolling = false;
+  Timer? _scrollIdleTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _computeDuplicateNames();
+  }
+
+  @override
+  void didUpdateWidget(_ChannelList oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!identical(oldWidget.channels, widget.channels)) {
+      _computeDuplicateNames();
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollIdleTimer?.cancel();
+    super.dispose();
+  }
+
+  void _computeDuplicateNames() {
+    final seen = <String>{};
+    final duplicates = <String>{};
+    for (final channel in widget.channels) {
+      if (!seen.add(channel.name)) {
+        duplicates.add(channel.name);
+      }
+    }
+    _duplicateNames = duplicates;
+  }
+
+  bool _onScroll(ScrollNotification notification) {
+    if (notification is ScrollEndNotification) {
+      _scrollIdleTimer?.cancel();
+      _scrollIdleTimer = Timer(const Duration(milliseconds: 120), () {
+        if (mounted && _scrolling) setState(() => _scrolling = false);
+      });
+    } else if (notification is ScrollStartNotification ||
+        notification is ScrollUpdateNotification) {
+      _scrollIdleTimer?.cancel();
+      if (!_scrolling) setState(() => _scrolling = true);
+    }
+    return false;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final channels = widget.channels;
     return Container(
       color: const Color(0xfff4efff),
       child: Column(
@@ -1998,7 +2068,7 @@ class _ChannelList extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  title,
+                  widget.title,
                   style: const TextStyle(
                     fontSize: 26,
                     fontWeight: FontWeight.w900,
@@ -2012,24 +2082,27 @@ class _ChannelList extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: ListView.separated(
-              controller: scrollController,
-              itemCount: channels.length,
-              separatorBuilder: (_, _) => const Divider(height: 1),
-              itemBuilder: (context, index) {
-                final channel = channels[index];
-                final selectedChannel = selected?.url == channel.url;
-                return _ChannelTile(
-                  channel: channel,
-                  selected: selectedChannel,
-                  hasRoutes:
-                      channels
-                          .where((item) => item.name == channel.name)
-                          .length >
-                      1,
-                  onTap: () => onPlay(channel),
-                );
-              },
+            child: NotificationListener<ScrollNotification>(
+              onNotification: _onScroll,
+              child: ListView.builder(
+                controller: widget.scrollController,
+                itemCount: channels.length,
+                // Fixed row height makes scrollbar dragging O(1) and exact:
+                // the list can jump straight to any offset without measuring
+                // every row, which is what made big drags freeze.
+                itemExtent: _channelRowHeight,
+                itemBuilder: (context, index) {
+                  final channel = channels[index];
+                  final selectedChannel = widget.selected?.url == channel.url;
+                  return _ChannelTile(
+                    channel: channel,
+                    selected: selectedChannel,
+                    hasRoutes: _duplicateNames.contains(channel.name),
+                    loadLogo: !_scrolling,
+                    onTap: () => widget.onPlay(channel),
+                  );
+                },
+              ),
             ),
           ),
         ],
@@ -2096,12 +2169,14 @@ class _ChannelTile extends StatelessWidget {
     required this.channel,
     required this.selected,
     required this.hasRoutes,
+    required this.loadLogo,
     required this.onTap,
   });
 
   final Channel channel;
   final bool selected;
   final bool hasRoutes;
+  final bool loadLogo;
   final VoidCallback onTap;
 
   @override
@@ -2110,23 +2185,27 @@ class _ChannelTile extends StatelessWidget {
       color: selected ? const Color(0xffeee6ff) : Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Container(
+          height: _channelRowHeight,
+          decoration: const BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: Color(0x1f000000), width: 1),
+            ),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
           child: Row(
             children: [
-              _ChannelLogo(url: channel.logo),
+              _ChannelLogo(url: channel.logo, load: loadLogo),
               const SizedBox(width: 10),
               Expanded(
                 child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 6,
-                      crossAxisAlignment: WrapCrossAlignment.center,
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
-                        ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 130),
+                        Flexible(
                           child: Text(
                             channel.name,
                             maxLines: 2,
@@ -2137,12 +2216,16 @@ class _ChannelTile extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (hasRoutes) const _Tag(label: 'routes'),
+                        if (hasRoutes) ...const [
+                          SizedBox(width: 8),
+                          _Tag(label: 'routes'),
+                        ],
                       ],
                     ),
                     const SizedBox(height: 4),
                     Text(
                       channel.group,
+                      maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: Color(0xff7d8490)),
                     ),
@@ -2158,11 +2241,13 @@ class _ChannelTile extends StatelessWidget {
 }
 
 class _ChannelLogo extends StatelessWidget {
-  const _ChannelLogo({this.url});
+  const _ChannelLogo({this.url, this.load = true});
   final String? url;
+  final bool load;
 
   @override
   Widget build(BuildContext context) {
+    final hasLogo = url != null && url!.isNotEmpty;
     return Container(
       width: 46,
       height: 46,
@@ -2171,7 +2256,7 @@ class _ChannelLogo extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
       ),
       clipBehavior: Clip.antiAlias,
-      child: url == null || url!.isEmpty
+      child: !hasLogo || !load
           ? const Icon(Icons.tv, color: Color(0xff8c94a1))
           : Padding(
               padding: const EdgeInsets.all(5),
@@ -2179,6 +2264,12 @@ class _ChannelLogo extends StatelessWidget {
                 url!,
                 fit: BoxFit.contain,
                 alignment: Alignment.center,
+                // Decode at roughly the displayed size (logo box is 46px, less
+                // padding) to cut memory and decode cost for long lists.
+                cacheWidth: 96,
+                cacheHeight: 96,
+                filterQuality: FilterQuality.low,
+                gaplessPlayback: true,
                 errorBuilder: (_, _, _) =>
                     const Icon(Icons.tv, color: Color(0xff8c94a1)),
               ),
