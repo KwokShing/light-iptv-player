@@ -1178,9 +1178,7 @@ class _IptvHomeState extends State<IptvHome> {
                   Expanded(
                     child: GestureDetector(
                       onDoubleTap: _toggleFullscreen,
-                      child: ColoredBox(
-                        color: Colors.black,
-                        child: Center(
+                      child: Center(
                           child: AspectRatio(
                             aspectRatio: _videoAspectRatio,
                             child: Stack(
@@ -1212,7 +1210,6 @@ class _IptvHomeState extends State<IptvHome> {
                         ),
                       ),
                     ),
-                  ),
                   if (!fullscreen)
                     _PlaybackControls(
                       streamUrlController: streamUrlController,
