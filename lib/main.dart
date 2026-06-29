@@ -1,11 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:charset_converter/charset_converter.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -212,6 +212,12 @@ class _IptvHomeState extends State<IptvHome> {
   bool _interpolationConfigured = false;
   bool fullscreen = false;
   bool fullscreenChanging = false;
+  // When fullscreen, the mouse cursor auto-hides after a short period of
+  // inactivity and reappears on any movement or click.
+  bool cursorHidden = false;
+  Timer? cursorHideTimer;
+  final FocusNode playerFocusNode = FocusNode();
+  static const _cursorHideDelay = Duration(seconds: 3);
   bool loading = true;
   // Maximum consecutive reconnect attempts before giving up. Reset to zero
   // whenever playback successfully resumes, so long-running segmented streams
@@ -313,6 +319,8 @@ class _IptvHomeState extends State<IptvHome> {
     playingSubscription?.cancel();
     bitrateTimer?.cancel();
     reconnectTimer?.cancel();
+    cursorHideTimer?.cancel();
+    playerFocusNode.dispose();
     streamUrlController.dispose();
     channelScrollController.dispose();
     player.dispose();
@@ -675,6 +683,8 @@ class _IptvHomeState extends State<IptvHome> {
       activeSource = null;
       fullscreen = false;
     });
+    cursorHideTimer?.cancel();
+    if (cursorHidden) setState(() => cursorHidden = false);
   }
 
   Future<void> _play(Channel channel) async {
@@ -765,6 +775,8 @@ class _IptvHomeState extends State<IptvHome> {
       hwdecCurrent = null;
       fullscreen = false;
     });
+    cursorHideTimer?.cancel();
+    if (cursorHidden) setState(() => cursorHidden = false);
   }
 
   double get _videoAspectRatio {
@@ -880,7 +892,50 @@ class _IptvHomeState extends State<IptvHome> {
       rethrow;
     } finally {
       fullscreenChanging = false;
+      _syncCursorHiding();
     }
+  }
+
+  // Schedules the cursor to hide while fullscreen, or restores it otherwise.
+  // Call whenever the fullscreen state changes.
+  void _syncCursorHiding() {
+    cursorHideTimer?.cancel();
+    if (fullscreen) {
+      playerFocusNode.requestFocus();
+      _scheduleCursorHide();
+    } else if (cursorHidden) {
+      setState(() => cursorHidden = false);
+    }
+  }
+
+  void _scheduleCursorHide() {
+    cursorHideTimer?.cancel();
+    cursorHideTimer = Timer(_cursorHideDelay, () {
+      if (mounted && fullscreen && !cursorHidden) {
+        setState(() => cursorHidden = true);
+      }
+    });
+  }
+
+  // Called on any mouse movement or click. Reveals the cursor (if hidden) and
+  // restarts the inactivity timer while fullscreen.
+  void _handlePointerActivity() {
+    if (!fullscreen) return;
+    if (cursorHidden) {
+      setState(() => cursorHidden = false);
+    }
+    _scheduleCursorHide();
+  }
+
+  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+    if (event is KeyDownEvent &&
+        event.logicalKey == LogicalKeyboardKey.escape &&
+        fullscreen &&
+        !fullscreenChanging) {
+      _toggleFullscreen();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   void _showMessage(String text) {
@@ -1046,9 +1101,24 @@ class _IptvHomeState extends State<IptvHome> {
       return matchesGroup && matchesSearch;
     }).toList();
 
-    return Scaffold(
-      backgroundColor: fullscreen ? Colors.black : const Color(0xfff6f8fc),
-      body: Row(
+    return Focus(
+      focusNode: playerFocusNode,
+      autofocus: true,
+      onKeyEvent: _handleKeyEvent,
+      child: MouseRegion(
+        cursor: (fullscreen && cursorHidden)
+            ? SystemMouseCursors.none
+            : MouseCursor.defer,
+        onHover: (_) => _handlePointerActivity(),
+        child: Listener(
+          onPointerDown: (_) => _handlePointerActivity(),
+          onPointerMove: (_) => _handlePointerActivity(),
+          onPointerSignal: (_) => _handlePointerActivity(),
+          child: Scaffold(
+            backgroundColor: fullscreen
+                ? Colors.black
+                : const Color(0xfff6f8fc),
+            body: Row(
         children: [
           SizedBox(
             width: fullscreen ? 0 : 190,
@@ -1166,6 +1236,9 @@ class _IptvHomeState extends State<IptvHome> {
             ),
           ),
         ],
+            ),
+          ),
+        ),
       ),
     );
   }
