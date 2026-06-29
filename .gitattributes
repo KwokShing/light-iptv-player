@@ -1,0 +1,25 @@
+# Normalize line endings to LF in the repository for all text files.
+# Git auto-detects text vs binary; checked-out files keep the platform's
+# native endings, but what's stored in the repo stays LF — so editing on
+# Windows no longer shows phantom "modified" diffs on generated files.
+* text=auto eol=lf
+
+# Windows-only scripts must stay CRLF to run correctly.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+*.ps1   text eol=crlf
+
+# Common binary assets — never touch their bytes.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.ttf   binary
+*.otf   binary
+*.woff  binary
+*.woff2 binary
+*.so    binary
+*.dll   binary
+*.exe   binary
+*.zip   binary
