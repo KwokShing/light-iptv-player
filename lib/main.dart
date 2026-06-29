@@ -41,8 +41,10 @@ Future<void> main() async {
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       title: 'Light IPTV Player',
-      size: Size(1360, 760),
-      minimumSize: Size(1040, 560),
+      // Height tuned so the video pane is ~16:9 at the default width, avoiding
+      // top/bottom black bars for the common 16:9 stream.
+      size: Size(1360, 680),
+      minimumSize: Size(1040, 520),
       center: true,
     ),
     () async {
@@ -1176,22 +1178,8 @@ class _IptvHomeState extends State<IptvHome> {
                   Expanded(
                     child: GestureDetector(
                       onDoubleTap: _toggleFullscreen,
-                      child: AnimatedContainer(
-                        duration: fullscreenAnimationDuration,
-                        curve: fullscreenAnimationCurve,
-                        clipBehavior: Clip.antiAlias,
-                        decoration: BoxDecoration(
-                          color: Colors.black,
-                          borderRadius: BorderRadius.circular(
-                            fullscreen ? 0 : 12,
-                          ),
-                          border: fullscreen
-                              ? null
-                              : Border.all(
-                                  color: const Color(0xffd9c7ff),
-                                  width: 2,
-                                ),
-                        ),
+                      child: ColoredBox(
+                        color: Colors.black,
                         child: Center(
                           child: AspectRatio(
                             aspectRatio: _videoAspectRatio,
