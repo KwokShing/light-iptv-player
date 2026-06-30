@@ -1668,6 +1668,22 @@ class _PlaybackControls extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              // Full channel name, shown in full (wraps instead of being
+              // truncated with an ellipsis).
+              if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false)) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: Text(
+                    nowPlaying!.name,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xff2b2f36),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+              ],
               // Compact, read-only URL pill. Kept selectable so the current
               // stream address can still be copied.
               SizedBox(
@@ -2877,7 +2893,6 @@ class _GroupTile extends StatelessWidget {
                 Expanded(
                   child: Text(
                     label,
-                    overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontWeight: selected ? FontWeight.w900 : FontWeight.w500,
                       color: selected ? const Color(0xff8357f7) : null,
