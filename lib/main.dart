@@ -1443,6 +1443,10 @@ class _IptvHomeState extends State<IptvHome> {
                   child: _ChannelList(
                     title: activeGroup,
                     channels: visibleChannels,
+                    // The sidebar already shows the selected group, so the
+                    // per-channel group label is redundant — except while
+                    // searching, where results span groups.
+                    showGroup: search.trim().isNotEmpty,
                     selected: nowPlaying,
                     scrollController: channelScrollController,
                     onPlay: _play,
@@ -2713,6 +2717,7 @@ class _ChannelList extends StatefulWidget {
     required this.selected,
     required this.scrollController,
     required this.onPlay,
+    this.showGroup = false,
   });
 
   final String title;
@@ -2720,6 +2725,7 @@ class _ChannelList extends StatefulWidget {
   final Channel? selected;
   final ScrollController scrollController;
   final ValueChanged<Channel> onPlay;
+  final bool showGroup;
 
   @override
   State<_ChannelList> createState() => _ChannelListState();
@@ -2828,6 +2834,7 @@ class _ChannelListState extends State<_ChannelList> {
                     selected: selectedChannel,
                     hasRoutes: _duplicateNames.contains(channel.name),
                     loadLogo: !_scrolling,
+                    showGroup: widget.showGroup,
                     onTap: () => widget.onPlay(channel),
                   );
                 },
@@ -2900,12 +2907,14 @@ class _ChannelTile extends StatelessWidget {
     required this.hasRoutes,
     required this.loadLogo,
     required this.onTap,
+    this.showGroup = false,
   });
 
   final Channel channel;
   final bool selected;
   final bool hasRoutes;
   final bool loadLogo;
+  final bool showGroup;
   final VoidCallback onTap;
 
   @override
@@ -2951,13 +2960,15 @@ class _ChannelTile extends StatelessWidget {
                         ],
                       ],
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      channel.group,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Color(0xff7d8490)),
-                    ),
+                    if (showGroup) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        channel.group,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: Color(0xff7d8490)),
+                      ),
+                    ],
                   ],
                 ),
               ),
