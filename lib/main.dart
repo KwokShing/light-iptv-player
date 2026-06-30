@@ -779,9 +779,32 @@ class _IptvHomeState extends State<IptvHome> {
     try {
       await _applyPlaybackOptions();
       if (!mounted || request != playbackRequest) return;
-      // Keep reconnecting=true (freeze frame stays up) until the playing event
-      // confirms the new segment is rendering.
-      await player.open(Media(channel.url));
+      // Keep reconnecting=true (freeze frame + spinner stay up) until the
+      // playing event confirms the new segment is rendering.
+      //
+      // Prefer mpv's `loadfile <url> replace`: it swaps the source while
+      // keeping the existing video output texture, so the last decoded frame
+      // stays on screen with no black flash. player.open() tears the texture
+      // down and flashes black, so it's only the fallback.
+      final platform = player.platform;
+      var replaced = false;
+      if (platform != null) {
+        try {
+          await (platform as dynamic).command([
+            'loadfile',
+            channel.url,
+            'replace',
+          ]);
+          await player.play();
+          replaced = true;
+        } catch (e) {
+          debugPrint('loadfile replace failed, falling back to open: $e');
+        }
+      }
+      if (!replaced) {
+        if (!mounted || request != playbackRequest) return;
+        await player.open(Media(channel.url));
+      }
     } catch (error) {
       debugPrint('Reconnect failed: $error');
       // Retry with backoff while the freeze frame remains on screen.
@@ -1353,6 +1376,37 @@ class _IptvHomeState extends State<IptvHome> {
                                       lastFrame!,
                                       fit: BoxFit.contain,
                                       gaplessPlayback: true,
+                                    ),
+                                  ),
+                                // Buffering/loading spinner shown over the
+                                // frozen frame while the next segment loads,
+                                // so it's clear playback is reconnecting and
+                                // not stalled.
+                                if (reconnecting)
+                                  const Positioned.fill(
+                                    child: Center(
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          color: Colors.black54,
+                                          borderRadius: BorderRadius.all(
+                                            Radius.circular(16),
+                                          ),
+                                        ),
+                                        child: Padding(
+                                          padding: EdgeInsets.all(20),
+                                          child: SizedBox(
+                                            width: 48,
+                                            height: 48,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 3,
+                                              valueColor:
+                                                  AlwaysStoppedAnimation<Color>(
+                                                    Color(0xff8357f7),
+                                                  ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
                                     ),
                                   ),
                                 // Auto-hiding transport overlay for fullscreen,
