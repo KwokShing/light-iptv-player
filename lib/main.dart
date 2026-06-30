@@ -1505,42 +1505,10 @@ class _PlaybackControls extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  _TransportButton(
-                    icon: Icons.photo_camera_outlined,
-                    tooltip: 'Snapshot',
-                    onPressed: onSnapshot,
-                  ),
-                  _TransportButton(
-                    icon: Icons.fullscreen,
-                    tooltip: 'Fullscreen (F / double-click)',
-                    onPressed: onFullscreen,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  const Text(
-                    'Now Playing',
-                    style: TextStyle(color: Color(0xff7d8490)),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      nowPlaying?.name ?? 'No stream selected',
-                      textAlign: TextAlign.end,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              Row(
-                children: [
-                  Expanded(
+                  Flexible(
                     child: Text(
                       playbackInfo,
+                      textAlign: TextAlign.end,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Color(0xff7d8490),
@@ -1571,6 +1539,17 @@ class _PlaybackControls extends StatelessWidget {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
+                  ),
+                  const SizedBox(width: 8),
+                  _TransportButton(
+                    icon: Icons.photo_camera_outlined,
+                    tooltip: 'Snapshot',
+                    onPressed: onSnapshot,
+                  ),
+                  _TransportButton(
+                    icon: Icons.fullscreen,
+                    tooltip: 'Fullscreen (F / double-click)',
+                    onPressed: onFullscreen,
                   ),
                 ],
               ),
