@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:charset_converter/charset_converter.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -254,6 +255,12 @@ class _IptvHomeState extends State<IptvHome> {
   ReleaseInfo? availableUpdate;
   bool updating = false;
   double? updateProgress;
+  // True while a "refresh all playlists" run is in progress, so the header
+  // button shows a spinner and can't be triggered again concurrently.
+  bool refreshingAll = false;
+  // IDs of sources currently being refreshed individually, so each tile can
+  // show its own spinner without blocking the others.
+  Set<String> refreshingSourceIds = const {};
 
   @override
   void initState() {
@@ -582,26 +589,109 @@ class _IptvHomeState extends State<IptvHome> {
   }
 
   Future<void> _refreshSource(PlaylistSource source) async {
+    if (refreshingSourceIds.contains(source.id)) return;
+    setState(
+      () => refreshingSourceIds = {...refreshingSourceIds, source.id},
+    );
     try {
-      if (source.kind == SourceKind.local) {
-        final text = await decodePlaylistBytes(
-          await File(source.source).readAsBytes(),
-        );
-        await _replaceSource(
-          source.copyWith(channels: parsePlaylist(text), cached: true),
-        );
-      } else if (source.kind == SourceKind.online) {
-        final response = await http.get(Uri.parse(source.source));
-        if (response.statusCode < 200 || response.statusCode >= 300) {
-          throw Exception('HTTP ${response.statusCode}');
-        }
-        final text = await decodeHttpPlaylist(response);
-        await _replaceSource(
-          source.copyWith(channels: parsePlaylist(text), cached: true),
+      final channels = await _fetchChannels(source);
+      await _replaceSource(source.copyWith(channels: channels, cached: true));
+    } catch (error) {
+      if (mounted) _showMessage('Update failed for "${source.name}": $error');
+    } finally {
+      if (mounted) {
+        setState(
+          () => refreshingSourceIds = {...refreshingSourceIds}
+            ..remove(source.id),
         );
       }
-    } catch (error) {
-      _showMessage('Refresh failed: $error');
+    }
+  }
+
+  // Fetch and parse a source's channels from its origin. Network/file I/O runs
+  // on the main isolate (CharsetConverter uses platform channels and can't run
+  // in a background isolate), but the CPU-heavy M3U parse is offloaded via
+  // `compute` so it never janks the UI. Throws on failure.
+  Future<List<Channel>> _fetchChannels(PlaylistSource source) async {
+    if (source.kind == SourceKind.local) {
+      final text = await decodePlaylistBytes(
+        await File(source.source).readAsBytes(),
+      );
+      return compute(parsePlaylist, text);
+    }
+    final response = await http.get(Uri.parse(source.source));
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Exception('HTTP ${response.statusCode}');
+    }
+    final text = await decodeHttpPlaylist(response);
+    return compute(parsePlaylist, text);
+  }
+
+  // Refresh every reloadable playlist (local + online) in one go. Single
+  // channels have no upstream to refresh and are skipped. Fetches run
+  // concurrently and state is written (and persisted) once at the end, so the
+  // list doesn't rebuild repeatedly mid-run.
+  Future<void> _refreshAllSources() async {
+    if (refreshingAll) return;
+    final reloadable = sources
+        .where((source) => source.kind != SourceKind.single)
+        .toList();
+    if (reloadable.isEmpty) {
+      _showMessage('No playlists to refresh');
+      return;
+    }
+    setState(() => refreshingAll = true);
+
+    Future<({String id, String name, List<Channel>? channels})> refreshOne(
+      PlaylistSource source,
+    ) async {
+      try {
+        final channels = await _fetchChannels(source);
+        return (id: source.id, name: source.name, channels: channels);
+      } catch (_) {
+        return (id: source.id, name: source.name, channels: null);
+      }
+    }
+
+    final results = await Future.wait(reloadable.map(refreshOne));
+
+    if (!mounted) return;
+
+    final updates = <String, List<Channel>>{};
+    var succeeded = 0;
+    final failures = <String>[];
+    for (final result in results) {
+      if (result.channels != null) {
+        updates[result.id] = result.channels!;
+        succeeded++;
+      } else {
+        failures.add(result.name);
+      }
+    }
+
+    PlaylistSource apply(PlaylistSource source) {
+      final channels = updates[source.id];
+      return channels == null
+          ? source
+          : source.copyWith(channels: channels, cached: true);
+    }
+
+    setState(() {
+      sources = sources.map(apply).toList();
+      if (activeSource != null) activeSource = apply(activeSource!);
+      if (playerSource != null) playerSource = apply(playerSource!);
+      refreshingAll = false;
+    });
+    await _saveSources();
+
+    if (!mounted) return;
+    // Only surface a bottom message when something failed; a success banner
+    // popping in right as the list rebuilds caused a visible frame hitch.
+    if (failures.isNotEmpty) {
+      _showMessage(
+        'Refreshed $succeeded, failed ${failures.length}: '
+        '${failures.join(', ')}',
+      );
     }
   }
 
@@ -1170,6 +1260,24 @@ class _IptvHomeState extends State<IptvHome> {
                   icon: const Icon(Icons.play_circle_outline),
                   label: const Text('Single Channel'),
                 ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: refreshingAll ? null : _refreshAllSources,
+                  icon: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: Center(
+                      child: refreshingAll
+                          ? const SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh, size: 18),
+                    ),
+                  ),
+                  label: const Text('Refresh All'),
+                ),
               ],
             ),
           ),
@@ -1192,6 +1300,7 @@ class _IptvHomeState extends State<IptvHome> {
                         onRefresh: source.kind == SourceKind.single
                             ? null
                             : () => _refreshSource(source),
+                        isRefreshing: refreshingSourceIds.contains(source.id),
                         onRename: () => _renameSource(source),
                         onDelete: () => _deleteSource(source),
                       );
@@ -2380,6 +2489,7 @@ class _SourceTile extends StatelessWidget {
     required this.onRename,
     required this.onDelete,
     this.onRefresh,
+    this.isRefreshing = false,
   });
 
   final PlaylistSource source;
@@ -2387,6 +2497,7 @@ class _SourceTile extends StatelessWidget {
   final VoidCallback? onRefresh;
   final VoidCallback onRename;
   final VoidCallback onDelete;
+  final bool isRefreshing;
 
   @override
   Widget build(BuildContext context) {
@@ -2457,8 +2568,14 @@ class _SourceTile extends StatelessWidget {
                         height: 38,
                       ),
                       padding: EdgeInsets.zero,
-                      onPressed: onRefresh,
-                      icon: const Icon(Icons.refresh),
+                      onPressed: isRefreshing ? null : onRefresh,
+                      icon: isRefreshing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh),
                     ),
                   IconButton(
                     constraints: const BoxConstraints.tightFor(
