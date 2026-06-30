@@ -228,6 +228,12 @@ class _IptvHomeState extends State<IptvHome> {
   final FocusNode playerFocusNode = FocusNode();
   static const _cursorHideDelay = Duration(seconds: 3);
   bool loading = true;
+  // Transport state surfaced in the control bar.
+  bool isPlaying = false;
+  double volume = 100;
+  bool muted = false;
+  // Volume to restore when unmuting; captured the moment mute is engaged.
+  double _volumeBeforeMute = 100;
   // Maximum consecutive reconnect attempts before giving up. Reset to zero
   // whenever playback successfully resumes, so long-running segmented streams
   // can reconnect indefinitely as long as each reconnect eventually plays.
@@ -382,7 +388,11 @@ class _IptvHomeState extends State<IptvHome> {
     // A successful resume means the previous segment boundary was crossed, so
     // clear the failure counter and drop the freeze-frame overlay.
     playingSubscription = player.stream.playing.listen((playing) {
-      if (!playing || !mounted) return;
+      if (!mounted) return;
+      if (isPlaying != playing) {
+        setState(() => isPlaying = playing);
+      }
+      if (!playing) return;
       reconnectAttempts = 0;
       if (reconnecting) {
         setState(() => reconnecting = false);
@@ -784,6 +794,72 @@ class _IptvHomeState extends State<IptvHome> {
     if (cursorHidden) setState(() => cursorHidden = false);
   }
 
+  Future<void> _togglePlayPause() async {
+    if (nowPlaying == null) return;
+    try {
+      await player.playOrPause();
+    } catch (error) {
+      _showMessage('Failed to toggle playback: $error');
+    }
+  }
+
+  Future<void> _setVolume(double value) async {
+    final next = value.clamp(0.0, 100.0);
+    setState(() {
+      volume = next;
+      muted = next == 0;
+    });
+    try {
+      await player.setVolume(next);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleMute() async {
+    if (muted || volume == 0) {
+      final restore = _volumeBeforeMute <= 0 ? 100.0 : _volumeBeforeMute;
+      await _setVolume(restore);
+    } else {
+      _volumeBeforeMute = volume;
+      await _setVolume(0);
+    }
+  }
+
+  Future<void> _takeSnapshot() async {
+    if (nowPlaying == null) return;
+    try {
+      final frame = await player.screenshot();
+      if (frame == null) {
+        _showMessage('Snapshot unavailable for this stream');
+        return;
+      }
+      final dir = await _snapshotDirectory();
+      final safeName = (nowPlaying?.name ?? 'snapshot')
+          .replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')
+          .trim();
+      final stamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .split('.')
+          .first;
+      final file = File('${dir.path}\\${safeName}_$stamp.png');
+      await file.writeAsBytes(frame);
+      _showMessage('Snapshot saved to ${file.path}');
+    } catch (error) {
+      _showMessage('Snapshot failed: $error');
+    }
+  }
+
+  Future<Directory> _snapshotDirectory() async {
+    // Save next to the executable under a Snapshots folder so it's easy to find
+    // regardless of where the portable app lives.
+    final base = File(Platform.resolvedExecutable).parent.path;
+    final dir = Directory('$base\\Snapshots');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
   double get _videoAspectRatio {
     final track = selectedTrack.video;
     final width = videoParams.dw ?? videoParams.w ?? track.w;
@@ -933,11 +1009,41 @@ class _IptvHomeState extends State<IptvHome> {
   }
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
-    if (event is KeyDownEvent &&
-        event.logicalKey == LogicalKeyboardKey.escape &&
-        fullscreen &&
-        !fullscreenChanging) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final key = event.logicalKey;
+
+    if (key == LogicalKeyboardKey.escape && fullscreen && !fullscreenChanging) {
       _toggleFullscreen();
+      return KeyEventResult.handled;
+    }
+
+    // Transport shortcuts only apply while a channel is loaded.
+    if (nowPlaying == null) return KeyEventResult.ignored;
+
+    if (key == LogicalKeyboardKey.space ||
+        key == LogicalKeyboardKey.mediaPlayPause) {
+      _togglePlayPause();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyS) {
+      _stopPlayback();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyM) {
+      _toggleMute();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyF) {
+      if (!fullscreenChanging) _toggleFullscreen();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowUp) {
+      _setVolume(volume + 5);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.arrowDown) {
+      _setVolume(volume - 5);
       return KeyEventResult.handled;
     }
     return KeyEventResult.ignored;
@@ -1200,6 +1306,28 @@ class _IptvHomeState extends State<IptvHome> {
                                       gaplessPlayback: true,
                                     ),
                                   ),
+                                // Auto-hiding transport overlay for fullscreen,
+                                // where the sidebar controls aren't visible.
+                                if (fullscreen)
+                                  _FullscreenControls(
+                                    visible: !cursorHidden,
+                                    isPlaying: isPlaying,
+                                    muted: muted,
+                                    title: nowPlaying?.name,
+                                    onPlayPause: nowPlaying == null
+                                        ? null
+                                        : _togglePlayPause,
+                                    onStop: nowPlaying == null
+                                        ? null
+                                        : _stopPlayback,
+                                    onMute: nowPlaying == null
+                                        ? null
+                                        : _toggleMute,
+                                    onSnapshot: nowPlaying == null
+                                        ? null
+                                        : _takeSnapshot,
+                                    onExitFullscreen: _toggleFullscreen,
+                                  ),
                               ],
                             ),
                           ),
@@ -1211,6 +1339,9 @@ class _IptvHomeState extends State<IptvHome> {
                       streamUrlController: streamUrlController,
                       nowPlaying: nowPlaying,
                       playbackInfo: playbackInfo,
+                      isPlaying: isPlaying,
+                      muted: muted,
+                      volume: volume,
                       hwActive:
                           hwdecCurrent != null &&
                           hwdecCurrent!.isNotEmpty &&
@@ -1218,6 +1349,12 @@ class _IptvHomeState extends State<IptvHome> {
                       onReplay: nowPlaying == null
                           ? null
                           : () => _play(nowPlaying!),
+                      onPlayPause: nowPlaying == null ? null : _togglePlayPause,
+                      onStop: nowPlaying == null ? null : _stopPlayback,
+                      onMute: nowPlaying == null ? null : _toggleMute,
+                      onVolume: nowPlaying == null ? null : _setVolume,
+                      onSnapshot: nowPlaying == null ? null : _takeSnapshot,
+                      onFullscreen: _toggleFullscreen,
                     ),
                 ],
               ),
@@ -1243,21 +1380,40 @@ class _PlaybackControls extends StatelessWidget {
     required this.streamUrlController,
     required this.nowPlaying,
     required this.playbackInfo,
+    required this.isPlaying,
+    required this.muted,
+    required this.volume,
     required this.hwActive,
     required this.onReplay,
+    required this.onPlayPause,
+    required this.onStop,
+    required this.onMute,
+    required this.onVolume,
+    required this.onSnapshot,
+    required this.onFullscreen,
   });
 
   final TextEditingController streamUrlController;
   final Channel? nowPlaying;
   final String playbackInfo;
+  final bool isPlaying;
+  final bool muted;
+  final double volume;
   final bool hwActive;
   final VoidCallback? onReplay;
+  final VoidCallback? onPlayPause;
+  final VoidCallback? onStop;
+  final VoidCallback? onMute;
+  final ValueChanged<double>? onVolume;
+  final VoidCallback? onSnapshot;
+  final VoidCallback? onFullscreen;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = constraints.maxWidth < 560;
+        final compact = constraints.maxWidth < 620;
+        final hasChannel = nowPlaying != null;
         return Padding(
           padding: const EdgeInsets.only(top: 10),
           child: Column(
@@ -1280,17 +1436,84 @@ class _PlaybackControls extends StatelessWidget {
                   ),
                   const SizedBox(width: 8),
                   SizedBox(
-                    width: compact ? 72 : 140,
+                    width: compact ? 72 : 120,
                     child: FilledButton(
                       onPressed: onReplay,
                       child: Padding(
                         padding: EdgeInsets.symmetric(
-                          horizontal: compact ? 0 : 18,
+                          horizontal: compact ? 0 : 12,
                           vertical: 14,
                         ),
                         child: const Text('Play'),
                       ),
                     ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              // Transport bar: play/pause, stop, volume, snapshot, fullscreen.
+              Row(
+                children: [
+                  _TransportButton(
+                    icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                    tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
+                    onPressed: onPlayPause,
+                  ),
+                  _TransportButton(
+                    icon: Icons.stop,
+                    tooltip: 'Stop (S)',
+                    onPressed: onStop,
+                  ),
+                  const SizedBox(width: 4),
+                  _TransportButton(
+                    icon: muted || volume == 0
+                        ? Icons.volume_off
+                        : volume < 50
+                        ? Icons.volume_down
+                        : Icons.volume_up,
+                    tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                    onPressed: onMute,
+                  ),
+                  SizedBox(
+                    width: compact ? 90 : 140,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 6,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 12,
+                        ),
+                      ),
+                      child: Slider(
+                        value: volume.clamp(0, 100),
+                        max: 100,
+                        onChanged: hasChannel ? onVolume : null,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 34,
+                    child: Text(
+                      '${volume.round()}',
+                      style: const TextStyle(
+                        color: Color(0xff7d8490),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  _TransportButton(
+                    icon: Icons.photo_camera_outlined,
+                    tooltip: 'Snapshot',
+                    onPressed: onSnapshot,
+                  ),
+                  _TransportButton(
+                    icon: Icons.fullscreen,
+                    tooltip: 'Fullscreen (F / double-click)',
+                    onPressed: onFullscreen,
                   ),
                 ],
               ),
@@ -1355,6 +1578,129 @@ class _PlaybackControls extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Compact icon button used across the transport bars.
+class _TransportButton extends StatelessWidget {
+  const _TransportButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.color,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: Icon(icon),
+      tooltip: tooltip,
+      onPressed: onPressed,
+      color: color,
+      iconSize: 22,
+      splashRadius: 22,
+    );
+  }
+}
+
+/// Auto-hiding transport overlay shown over the video while in fullscreen.
+class _FullscreenControls extends StatelessWidget {
+  const _FullscreenControls({
+    required this.visible,
+    required this.isPlaying,
+    required this.muted,
+    required this.title,
+    required this.onPlayPause,
+    required this.onStop,
+    required this.onMute,
+    required this.onSnapshot,
+    required this.onExitFullscreen,
+  });
+
+  final bool visible;
+  final bool isPlaying;
+  final bool muted;
+  final String? title;
+  final VoidCallback? onPlayPause;
+  final VoidCallback? onStop;
+  final VoidCallback? onMute;
+  final VoidCallback? onSnapshot;
+  final VoidCallback? onExitFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 180),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [Color(0xcc000000), Color(0x00000000)],
+              ),
+            ),
+            child: Row(
+              children: [
+                _TransportButton(
+                  icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                  tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
+                  onPressed: onPlayPause,
+                  color: Colors.white,
+                ),
+                _TransportButton(
+                  icon: Icons.stop,
+                  tooltip: 'Stop (S)',
+                  onPressed: onStop,
+                  color: Colors.white,
+                ),
+                _TransportButton(
+                  icon: muted ? Icons.volume_off : Icons.volume_up,
+                  tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                  onPressed: onMute,
+                  color: Colors.white,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    title ?? '',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                _TransportButton(
+                  icon: Icons.photo_camera_outlined,
+                  tooltip: 'Snapshot',
+                  onPressed: onSnapshot,
+                  color: Colors.white,
+                ),
+                _TransportButton(
+                  icon: Icons.fullscreen_exit,
+                  tooltip: 'Exit fullscreen (F / Esc)',
+                  onPressed: onExitFullscreen,
+                  color: Colors.white,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
