@@ -208,6 +208,8 @@ class _IptvHomeState extends State<IptvHome> {
   StreamSubscription<Track>? trackSubscription;
   StreamSubscription<bool>? completedSubscription;
   StreamSubscription<bool>? playingSubscription;
+  StreamSubscription<Duration>? positionSubscription;
+  StreamSubscription<Duration>? durationSubscription;
   Timer? bitrateTimer;
   Timer? reconnectTimer;
   int reconnectAttempts = 0;
@@ -230,6 +232,14 @@ class _IptvHomeState extends State<IptvHome> {
   bool loading = true;
   // Transport state surfaced in the control bar.
   bool isPlaying = false;
+  // Current playback position and total duration. For live streams the
+  // duration stays zero, in which case the progress bar is shown disabled.
+  Duration position = Duration.zero;
+  Duration duration = Duration.zero;
+  // While the user is dragging the progress thumb we show their target value
+  // and hold off applying stream position updates so the thumb doesn't jump.
+  bool _seeking = false;
+  Duration _seekTarget = Duration.zero;
   double volume = 100;
   bool muted = false;
   // Volume to restore when unmuting; captured the moment mute is engaged.
@@ -328,6 +338,8 @@ class _IptvHomeState extends State<IptvHome> {
     trackSubscription?.cancel();
     completedSubscription?.cancel();
     playingSubscription?.cancel();
+    positionSubscription?.cancel();
+    durationSubscription?.cancel();
     bitrateTimer?.cancel();
     reconnectTimer?.cancel();
     cursorHideTimer?.cancel();
@@ -400,6 +412,14 @@ class _IptvHomeState extends State<IptvHome> {
     });
     bitrateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       _pollBitrate();
+    });
+    positionSubscription = player.stream.position.listen((value) {
+      if (!mounted || _seeking) return;
+      setState(() => position = value);
+    });
+    durationSubscription = player.stream.duration.listen((value) {
+      if (!mounted) return;
+      setState(() => duration = value);
     });
   }
 
@@ -714,6 +734,9 @@ class _IptvHomeState extends State<IptvHome> {
       nowPlaying = channel;
       videoParams = const VideoParams();
       selectedTrack = const Track();
+      position = Duration.zero;
+      duration = Duration.zero;
+      _seeking = false;
     });
     await player.stop();
     if (!mounted || request != playbackRequest) return;
@@ -789,6 +812,9 @@ class _IptvHomeState extends State<IptvHome> {
       containerFps = null;
       hwdecCurrent = null;
       fullscreen = false;
+      position = Duration.zero;
+      duration = Duration.zero;
+      _seeking = false;
     });
     cursorHideTimer?.cancel();
     if (cursorHidden) setState(() => cursorHidden = false);
@@ -800,6 +826,29 @@ class _IptvHomeState extends State<IptvHome> {
       await player.playOrPause();
     } catch (error) {
       _showMessage('Failed to toggle playback: $error');
+    }
+  }
+
+  // Called continuously while dragging so the thumb tracks the pointer without
+  // committing the seek until the drag ends.
+  void _onSeekChanged(double seconds) {
+    setState(() {
+      _seeking = true;
+      _seekTarget = Duration(milliseconds: (seconds * 1000).round());
+      position = _seekTarget;
+    });
+  }
+
+  Future<void> _onSeekEnd(double seconds) async {
+    final target = Duration(milliseconds: (seconds * 1000).round());
+    setState(() {
+      position = target;
+      _seeking = false;
+    });
+    try {
+      await player.seek(target);
+    } catch (error) {
+      _showMessage('Failed to seek: $error');
     }
   }
 
@@ -1314,6 +1363,14 @@ class _IptvHomeState extends State<IptvHome> {
                                     isPlaying: isPlaying,
                                     muted: muted,
                                     title: nowPlaying?.name,
+                                    position: position,
+                                    duration: duration,
+                                    onSeekChanged: nowPlaying == null
+                                        ? null
+                                        : _onSeekChanged,
+                                    onSeekEnd: nowPlaying == null
+                                        ? null
+                                        : _onSeekEnd,
                                     onPlayPause: nowPlaying == null
                                         ? null
                                         : _togglePlayPause,
@@ -1342,6 +1399,10 @@ class _IptvHomeState extends State<IptvHome> {
                       isPlaying: isPlaying,
                       muted: muted,
                       volume: volume,
+                      position: position,
+                      duration: duration,
+                      onSeekChanged: nowPlaying == null ? null : _onSeekChanged,
+                      onSeekEnd: nowPlaying == null ? null : _onSeekEnd,
                       hwActive:
                           hwdecCurrent != null &&
                           hwdecCurrent!.isNotEmpty &&
@@ -1383,6 +1444,10 @@ class _PlaybackControls extends StatelessWidget {
     required this.isPlaying,
     required this.muted,
     required this.volume,
+    required this.position,
+    required this.duration,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
     required this.hwActive,
     required this.onReplay,
     required this.onPlayPause,
@@ -1399,6 +1464,10 @@ class _PlaybackControls extends StatelessWidget {
   final bool isPlaying;
   final bool muted;
   final double volume;
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onSeekChanged;
+  final ValueChanged<double>? onSeekEnd;
   final bool hwActive;
   final VoidCallback? onReplay;
   final VoidCallback? onPlayPause;
@@ -1414,68 +1483,102 @@ class _PlaybackControls extends StatelessWidget {
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 620;
         final hasChannel = nowPlaying != null;
-        return Padding(
-          padding: const EdgeInsets.only(top: 10),
+        return Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.fromLTRB(14, 10, 10, 6),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xffe9edf3)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0f000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: streamUrlController,
-                      readOnly: true,
-                      decoration: const InputDecoration(
-                        filled: true,
-                        fillColor: Colors.white,
-                        border: OutlineInputBorder(),
-                        hintText: 'Stream URL',
-                        isDense: true,
-                      ),
+              // Compact, read-only URL pill. Kept selectable so the current
+              // stream address can still be copied.
+              SizedBox(
+                height: 34,
+                child: TextField(
+                  controller: streamUrlController,
+                  readOnly: true,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    color: Color(0xff5f6772),
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xfff2f4f8),
+                    hintText: 'Stream URL',
+                    hintStyle: const TextStyle(
+                      fontSize: 12.5,
+                      color: Color(0xffb0b7c3),
+                    ),
+                    prefixIcon: const Icon(
+                      Icons.link_rounded,
+                      size: 17,
+                      color: Color(0xffb0b7c3),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 0,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  SizedBox(
-                    width: compact ? 72 : 120,
-                    child: FilledButton(
-                      onPressed: onReplay,
-                      child: Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: compact ? 0 : 12,
-                          vertical: 14,
-                        ),
-                        child: const Text('Play'),
-                      ),
-                    ),
-                  ),
-                ],
+                ),
               ),
-              const SizedBox(height: 10),
-              // Transport bar: play/pause, stop, volume, snapshot, fullscreen.
+              const SizedBox(height: 2),
+              // Draggable playback progress bar (VOD seeking). Shows a "LIVE"
+              // indicator for streams with no known duration.
+              _SeekBar(
+                position: position,
+                duration: duration,
+                onChanged: onSeekChanged,
+                onChangeEnd: onSeekEnd,
+              ),
+              // Transport bar: play/pause, stop, reload, volume, then status,
+              // HW badge, snapshot and fullscreen.
               Row(
                 children: [
                   _TransportButton(
-                    icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                    icon: isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
                     tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
                     onPressed: onPlayPause,
+                    primary: true,
                   ),
                   _TransportButton(
-                    icon: Icons.stop,
+                    icon: Icons.stop_rounded,
                     tooltip: 'Stop (S)',
                     onPressed: onStop,
                   ),
-                  const SizedBox(width: 4),
+                  _TransportButton(
+                    icon: Icons.refresh_rounded,
+                    tooltip: 'Reload stream',
+                    onPressed: onReplay,
+                  ),
+                  const SizedBox(width: 6),
                   _TransportButton(
                     icon: muted || volume == 0
-                        ? Icons.volume_off
+                        ? Icons.volume_off_rounded
                         : volume < 50
-                        ? Icons.volume_down
-                        : Icons.volume_up,
+                        ? Icons.volume_down_rounded
+                        : Icons.volume_up_rounded,
                     tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
                     onPressed: onMute,
                   ),
                   SizedBox(
-                    width: compact ? 90 : 140,
+                    width: compact ? 72 : 110,
                     child: SliderTheme(
                       data: SliderTheme.of(context).copyWith(
                         trackHeight: 3,
@@ -1494,7 +1597,7 @@ class _PlaybackControls extends StatelessWidget {
                     ),
                   ),
                   SizedBox(
-                    width: 34,
+                    width: 30,
                     child: Text(
                       '${volume.round()}',
                       style: const TextStyle(
@@ -1520,14 +1623,14 @@ class _PlaybackControls extends StatelessWidget {
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
+                      horizontal: 7,
                       vertical: 3,
                     ),
                     decoration: BoxDecoration(
                       color: hwActive
                           ? const Color(0x1a8357f7)
-                          : const Color(0xffe8e8e8),
-                      borderRadius: BorderRadius.circular(4),
+                          : const Color(0xffeef0f4),
+                      borderRadius: BorderRadius.circular(6),
                     ),
                     child: Text(
                       hwActive ? 'HW' : 'SW',
@@ -1540,14 +1643,14 @@ class _PlaybackControls extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 4),
                   _TransportButton(
                     icon: Icons.photo_camera_outlined,
                     tooltip: 'Snapshot',
                     onPressed: onSnapshot,
                   ),
                   _TransportButton(
-                    icon: Icons.fullscreen,
+                    icon: Icons.fullscreen_rounded,
                     tooltip: 'Fullscreen (F / double-click)',
                     onPressed: onFullscreen,
                   ),
@@ -1568,22 +1671,151 @@ class _TransportButton extends StatelessWidget {
     required this.tooltip,
     required this.onPressed,
     this.color,
+    this.primary = false,
   });
 
   final IconData icon;
   final String tooltip;
   final VoidCallback? onPressed;
   final Color? color;
+  // Highlights the button with the accent color (used for play/pause).
+  final bool primary;
 
   @override
   Widget build(BuildContext context) {
+    final resolvedColor =
+        color ?? (primary ? const Color(0xff8357f7) : const Color(0xff5f6772));
     return IconButton(
       icon: Icon(icon),
       tooltip: tooltip,
       onPressed: onPressed,
-      color: color,
-      iconSize: 22,
-      splashRadius: 22,
+      color: resolvedColor,
+      iconSize: primary ? 24 : 20,
+      padding: const EdgeInsets.all(6),
+      constraints: const BoxConstraints(),
+      visualDensity: VisualDensity.compact,
+      splashRadius: 20,
+    );
+  }
+}
+
+/// Draggable playback progress bar with elapsed/remaining time labels.
+///
+/// For live streams the player reports a zero duration; in that case the bar
+/// is replaced with a non-interactive "LIVE" indicator since seeking isn't
+/// meaningful.
+class _SeekBar extends StatelessWidget {
+  const _SeekBar({
+    required this.position,
+    required this.duration,
+    required this.onChanged,
+    required this.onChangeEnd,
+    this.dark = false,
+  });
+
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onChanged;
+  final ValueChanged<double>? onChangeEnd;
+  final bool dark;
+
+  static String _format(Duration d) {
+    final negative = d.isNegative;
+    final value = negative ? -d : d;
+    final hours = value.inHours;
+    final minutes = value.inMinutes.remainder(60);
+    final seconds = value.inSeconds.remainder(60);
+    final mm = minutes.toString().padLeft(hours > 0 ? 2 : 1, '0');
+    final ss = seconds.toString().padLeft(2, '0');
+    final body = hours > 0 ? '$hours:$mm:$ss' : '$mm:$ss';
+    return negative ? '-$body' : body;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = dark ? Colors.white70 : const Color(0xff7d8490);
+    final totalMs = duration.inMilliseconds;
+    final isLive = totalMs <= 0;
+    final labelStyle = TextStyle(
+      color: textColor,
+      fontSize: 12,
+      fontWeight: FontWeight.w600,
+      fontFeatures: const [FontFeature.tabularFigures()],
+    );
+
+    if (isLive) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: const BoxDecoration(
+                color: Color(0xffe53935),
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text('LIVE', style: labelStyle),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Container(
+                height: 3,
+                decoration: BoxDecoration(
+                  color: dark ? Colors.white24 : const Color(0xffe0e0e0),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final positionMs = position.inMilliseconds.clamp(0, totalMs).toDouble();
+    final enabled = onChanged != null;
+    return Row(
+      children: [
+        SizedBox(
+          width: 48,
+          child: Text(
+            _format(position),
+            textAlign: TextAlign.center,
+            style: labelStyle,
+          ),
+        ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+              activeTrackColor: dark ? Colors.white : null,
+              thumbColor: dark ? Colors.white : null,
+              inactiveTrackColor: dark ? Colors.white30 : null,
+            ),
+            child: Slider(
+              value: positionMs,
+              max: totalMs.toDouble(),
+              onChanged: enabled
+                  ? (value) => onChanged!(value / 1000)
+                  : null,
+              onChangeEnd: enabled && onChangeEnd != null
+                  ? (value) => onChangeEnd!(value / 1000)
+                  : null,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 48,
+          child: Text(
+            _format(duration),
+            textAlign: TextAlign.center,
+            style: labelStyle,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1595,6 +1827,10 @@ class _FullscreenControls extends StatelessWidget {
     required this.isPlaying,
     required this.muted,
     required this.title,
+    required this.position,
+    required this.duration,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
     required this.onPlayPause,
     required this.onStop,
     required this.onMute,
@@ -1606,6 +1842,10 @@ class _FullscreenControls extends StatelessWidget {
   final bool isPlaying;
   final bool muted;
   final String? title;
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onSeekChanged;
+  final ValueChanged<double>? onSeekEnd;
   final VoidCallback? onPlayPause;
   final VoidCallback? onStop;
   final VoidCallback? onMute;
@@ -1632,48 +1872,60 @@ class _FullscreenControls extends StatelessWidget {
                 colors: [Color(0xcc000000), Color(0x00000000)],
               ),
             ),
-            child: Row(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                _TransportButton(
-                  icon: isPlaying ? Icons.pause : Icons.play_arrow,
-                  tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
-                  onPressed: onPlayPause,
-                  color: Colors.white,
+                _SeekBar(
+                  position: position,
+                  duration: duration,
+                  onChanged: onSeekChanged,
+                  onChangeEnd: onSeekEnd,
+                  dark: true,
                 ),
-                _TransportButton(
-                  icon: Icons.stop,
-                  tooltip: 'Stop (S)',
-                  onPressed: onStop,
-                  color: Colors.white,
-                ),
-                _TransportButton(
-                  icon: muted ? Icons.volume_off : Icons.volume_up,
-                  tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
-                  onPressed: onMute,
-                  color: Colors.white,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    title ?? '',
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                Row(
+                  children: [
+                    _TransportButton(
+                      icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                      tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
+                      onPressed: onPlayPause,
                       color: Colors.white,
-                      fontWeight: FontWeight.w700,
                     ),
-                  ),
-                ),
-                _TransportButton(
-                  icon: Icons.photo_camera_outlined,
-                  tooltip: 'Snapshot',
-                  onPressed: onSnapshot,
-                  color: Colors.white,
-                ),
-                _TransportButton(
-                  icon: Icons.fullscreen_exit,
-                  tooltip: 'Exit fullscreen (F / Esc)',
-                  onPressed: onExitFullscreen,
-                  color: Colors.white,
+                    _TransportButton(
+                      icon: Icons.stop,
+                      tooltip: 'Stop (S)',
+                      onPressed: onStop,
+                      color: Colors.white,
+                    ),
+                    _TransportButton(
+                      icon: muted ? Icons.volume_off : Icons.volume_up,
+                      tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                      onPressed: onMute,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        title ?? '',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    _TransportButton(
+                      icon: Icons.photo_camera_outlined,
+                      tooltip: 'Snapshot',
+                      onPressed: onSnapshot,
+                      color: Colors.white,
+                    ),
+                    _TransportButton(
+                      icon: Icons.fullscreen_exit,
+                      tooltip: 'Exit fullscreen (F / Esc)',
+                      onPressed: onExitFullscreen,
+                      color: Colors.white,
+                    ),
+                  ],
                 ),
               ],
             ),
