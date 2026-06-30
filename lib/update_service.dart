@@ -122,9 +122,12 @@ class UpdateService {
     return false;
   }
 
-  /// Downloads [url] into the application's root directory (the folder that
-  /// contains the running executable), saved as [assetName], and returns the
-  /// saved file. Progress is reported in 0..1 when the content length is known.
+  /// Downloads [url] into a fresh temporary directory, saved as [assetName],
+  /// and returns the saved file. Progress is reported in 0..1 when the content
+  /// length is known.
+  ///
+  /// The download lands in a temp folder (not next to the executable) because
+  /// the running install directory is replaced wholesale during [applyUpdate].
   static Future<File> download(
     String url, {
     void Function(double progress)? onProgress,
@@ -139,8 +142,8 @@ class UpdateService {
       }
 
       final total = response.contentLength ?? 0;
-      final installDir = File(Platform.resolvedExecutable).parent.path;
-      final file = File('$installDir\\$assetName');
+      final tempDir = Directory.systemTemp.createTempSync('litv_update_');
+      final file = File('${tempDir.path}\\$assetName');
       final sink = file.openWrite();
       var received = 0;
       await for (final chunk in response.stream) {
@@ -155,11 +158,119 @@ class UpdateService {
     }
   }
 
-  /// Opens Windows Explorer with the downloaded zip selected so the user can
-  /// extract it over the installation. Best-effort; failures are ignored.
-  static Future<void> revealInExplorer(File file) async {
-    try {
-      await Process.start('explorer.exe', ['/select,${file.path}']);
-    } catch (_) {}
+  /// Performs an in-place upgrade, mirroring v2rayN's external-helper approach.
+  ///
+  /// A running `.exe` can't overwrite its own files on Windows, so this writes
+  /// a small PowerShell updater to a temp folder and launches it in its own
+  /// detached console window. The updater waits for this process to exit,
+  /// extracts [zip] over the install directory, removes the downloaded archive,
+  /// and relaunches the application.
+  ///
+  /// The caller is expected to quit the app immediately after this returns (see
+  /// [quit]) so the updater can replace the locked files.
+  static Future<void> applyUpdate(File zip) async {
+    if (!Platform.isWindows) {
+      throw UnsupportedError('In-place update is only supported on Windows.');
+    }
+
+    final exePath = Platform.resolvedExecutable;
+    final installDir = File(exePath).parent.path;
+    final ownerPid = pid;
+
+    final script = _buildUpdaterScript(
+      zipPath: zip.path,
+      installDir: installDir,
+      exePath: exePath,
+      ownerPid: ownerPid,
+    );
+
+    final scriptDir = Directory.systemTemp.createTempSync('litv_updater_');
+    final scriptFile = File('${scriptDir.path}\\apply_update.ps1');
+    await scriptFile.writeAsString(script);
+
+    // Launch the updater in its own console window, fully detached so it
+    // outlives this process. `cmd /c start` spawns the new window; the updater
+    // then waits for us to exit before touching any files.
+    await Process.start(
+      'cmd.exe',
+      [
+        '/c',
+        'start',
+        'Light IPTV Player Updater',
+        'powershell.exe',
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        scriptFile.path,
+      ],
+      mode: ProcessStartMode.detached,
+      runInShell: false,
+    );
+  }
+
+  /// Terminates the current process so the external updater can replace files.
+  static Never quit() => exit(0);
+
+  /// Escapes a string for safe embedding inside a single-quoted PowerShell
+  /// literal (the only PowerShell escape needed there is doubling quotes).
+  static String _psLiteral(String value) =>
+      "'${value.replaceAll("'", "''")}'";
+
+  static String _buildUpdaterScript({
+    required String zipPath,
+    required String installDir,
+    required String exePath,
+    required int ownerPid,
+  }) {
+    final zip = _psLiteral(zipPath);
+    final install = _psLiteral(installDir);
+    final exe = _psLiteral(exePath);
+
+    // Robocopy flags: /E recurse incl. empty dirs, /R:10 /W:1 retry on locked
+    // files (the exe may take a moment to release), quiet output. Robocopy
+    // exit codes 0-7 indicate success.
+    return '''
+\$ErrorActionPreference = 'Stop'
+\$zip     = $zip
+\$install = $install
+\$exe     = $exe
+\$ownerPid = $ownerPid
+
+Write-Host 'Upgrading Light IPTV Player...'
+
+# Wait for the running app to exit, then make sure it's gone.
+try { Wait-Process -Id \$ownerPid -Timeout 15 -ErrorAction SilentlyContinue } catch {}
+try { Stop-Process -Id \$ownerPid -Force -ErrorAction SilentlyContinue } catch {}
+
+for (\$i = 3; \$i -gt 0; \$i--) { Write-Host \$i; Start-Sleep -Seconds 1 }
+
+Write-Host 'Extracting the update package...'
+\$staging = Join-Path \$env:TEMP ('litv_stage_' + [guid]::NewGuid().ToString('N'))
+Expand-Archive -LiteralPath \$zip -DestinationPath \$staging -Force
+
+# Support both layouts: files at the zip root, or wrapped in a single folder.
+\$items = Get-ChildItem -LiteralPath \$staging
+if (\$items.Count -eq 1 -and \$items[0].PSIsContainer) {
+    \$source = \$items[0].FullName
+} else {
+    \$source = \$staging
+}
+
+Write-Host 'Replacing application files...'
+robocopy \$source \$install /E /R:10 /W:1 /NFL /NDL /NJH /NJS /NC /NS | Out-Null
+if (\$LASTEXITCODE -ge 8) {
+    Write-Host 'Update failed while copying files. Press any key to exit...'
+    \$null = \$Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+    exit 1
+}
+
+Remove-Item -LiteralPath \$staging -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath \$zip -Force -ErrorAction SilentlyContinue
+
+Write-Host 'Restarting...'
+Start-Sleep -Seconds 1
+Start-Process -FilePath \$exe -WorkingDirectory \$install
+''';
   }
 }

@@ -301,18 +301,14 @@ class _IptvHomeState extends State<IptvHome> {
         },
       );
       if (!mounted) return;
-      setState(() {
-        updating = false;
-        updateProgress = null;
-        availableUpdate = null;
-      });
-      // The zip is saved next to the executable; open Explorer with it
-      // selected so the user can extract it over the current install.
-      await UpdateService.revealInExplorer(zip);
-      _showMessage(
-        'Update downloaded to ${zip.path}. Close the app, then extract the '
-        'zip and replace the existing files.',
-      );
+      setState(() => updateProgress = null);
+      _showMessage('Update downloaded. Restarting to apply...');
+
+      // Hand off to the external updater (its own console window), then quit so
+      // it can replace the locked application files and relaunch us.
+      await UpdateService.applyUpdate(zip);
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      UpdateService.quit();
     } catch (error) {
       if (!mounted) return;
       setState(() => updating = false);
