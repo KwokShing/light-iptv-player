@@ -431,6 +431,11 @@ class _IptvHomeState extends State<IptvHome> {
     });
     positionSubscription = player.stream.position.listen((value) {
       if (!mounted || _seeking) return;
+      // The progress UI only shows whole seconds, so ignore the sub-second
+      // firehose. This alone cuts page rebuilds during playback from many per
+      // second down to about one, avoiding a full channel-list re-filter and
+      // duplicate-name rescan on every tick.
+      if (value.inSeconds == position.inSeconds) return;
       setState(() => position = value);
     });
     durationSubscription = player.stream.duration.listen((value) {
@@ -1409,16 +1414,34 @@ class _IptvHomeState extends State<IptvHome> {
     );
   }
 
-  Widget _buildPlayerPage(PlaylistSource source) {
-    final groups = source.groups;
-    final visibleChannels = source.channels.where((channel) {
+  // Cache of the last group/search filter so the potentially huge channel
+  // filter (and the downstream duplicate-name scan in _ChannelList) doesn't
+  // rerun on every position/bitrate tick that rebuilds the page. Returns the
+  // same list instance until the inputs actually change, which also lets
+  // _ChannelList skip its rescan via its identical() guard.
+  List<Channel> _visibleChannelsCache = const [];
+  String? _visibleChannelsKey;
+
+  List<Channel> _computeVisibleChannels(PlaylistSource source) {
+    final key =
+        '${source.id}|${identityHashCode(source.channels)}|$activeGroup|$search';
+    if (key == _visibleChannelsKey) return _visibleChannelsCache;
+    final query = search.trim().toLowerCase();
+    final filtered = source.channels.where((channel) {
       final matchesGroup =
           activeGroup == allChannels || channel.group == activeGroup;
       final matchesSearch =
-          search.trim().isEmpty ||
-          channel.name.toLowerCase().contains(search.toLowerCase());
+          query.isEmpty || channel.name.toLowerCase().contains(query);
       return matchesGroup && matchesSearch;
     }).toList();
+    _visibleChannelsKey = key;
+    _visibleChannelsCache = filtered;
+    return filtered;
+  }
+
+  Widget _buildPlayerPage(PlaylistSource source) {
+    final groups = source.groups;
+    final visibleChannels = _computeVisibleChannels(source);
 
     return Focus(
       focusNode: playerFocusNode,
