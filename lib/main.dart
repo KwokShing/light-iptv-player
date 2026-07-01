@@ -26,9 +26,10 @@ const ungroupedGroup = 'Ungrouped';
 const releaseTag = String.fromEnvironment('RELEASE_TAG');
 const fullscreenAnimationDuration = Duration(milliseconds: 180);
 const fullscreenAnimationCurve = Curves.easeOutCubic;
-// Fixed height of a channel row, including its bottom divider. Sized to fit a
-// two-line channel name plus the group label without overflow.
-const _channelRowHeight = 78.0;
+// Fixed height of a channel row, including its bottom divider. Sized to fit the
+// 46px logo (plus padding) and, while searching, a single-line name above the
+// group label without overflow.
+const _channelRowHeight = 64.0;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -3145,7 +3146,7 @@ class _ChannelTile extends StatelessWidget {
               bottom: BorderSide(color: Color(0x1f000000), width: 1),
             ),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
             children: [
               _ChannelLogo(url: channel.logo, load: loadLogo),
@@ -3161,7 +3162,10 @@ class _ChannelTile extends StatelessWidget {
                         Flexible(
                           child: Text(
                             channel.name,
-                            maxLines: 2,
+                            // Names get two lines when browsing (no subtitle),
+                            // but only one while searching so the row still fits
+                            // the group label below without overflowing.
+                            maxLines: showGroup ? 1 : 2,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontWeight: FontWeight.w800,
@@ -3215,12 +3219,16 @@ class _ChannelLogo extends StatelessWidget {
       width: 46,
       height: 46,
       decoration: BoxDecoration(
-        color: const Color(0xffe9edf3),
-        borderRadius: BorderRadius.circular(8),
+        // Dark violet tile: most TV channel logos are white/light artwork, so a
+        // light background made them nearly invisible. Tinting the dark tile
+        // toward the app's purple accent keeps white logos crisp while sitting
+        // more harmoniously in the lavender UI than a stark black box.
+        color: const Color(0xff2a2540),
+        borderRadius: BorderRadius.circular(10),
       ),
       clipBehavior: Clip.antiAlias,
       child: !hasLogo || (!load && !alreadyLoaded)
-          ? const Icon(Icons.tv, color: Color(0xff8c94a1))
+          ? const Icon(Icons.tv, color: Color(0xff8891a3))
           : Padding(
               padding: const EdgeInsets.all(5),
               child: Image.network(
@@ -3244,7 +3252,7 @@ class _ChannelLogo extends StatelessWidget {
                   return child;
                 },
                 errorBuilder: (_, _, _) =>
-                    const Icon(Icons.tv, color: Color(0xff8c94a1)),
+                    const Icon(Icons.tv, color: Color(0xff8891a3)),
               ),
             ),
     );
