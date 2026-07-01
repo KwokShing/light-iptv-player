@@ -361,7 +361,11 @@ class _IptvHomeState extends State<IptvHome> {
     final nextPlayer = Player(
       configuration: const PlayerConfiguration(
         title: 'Light IPTV Player',
-        bufferSize: 64 * 1024 * 1024,
+        // Forward read-ahead cache. media_kit turns this into mpv's
+        // `demuxer-max-bytes`. 32 MiB is plenty of buffering for IPTV while
+        // keeping the resident cache modest. (It also seeds
+        // `demuxer-max-back-bytes`, which we override per-stream below.)
+        bufferSize: 32 * 1024 * 1024,
       ),
     );
     final nextVideoController = VideoController(
@@ -415,6 +419,11 @@ class _IptvHomeState extends State<IptvHome> {
       reconnectAttempts = 0;
       if (reconnecting) {
         setState(() => reconnecting = false);
+        // The new segment is rendering, so the frozen frame is no longer
+        // shown. Drop it and evict its decoded bitmap from the global image
+        // cache; otherwise each reconnect's full-resolution screenshot stays
+        // pinned there and memory climbs steadily on long-running streams.
+        _clearFreezeFrame();
       }
     });
     bitrateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -437,8 +446,21 @@ class _IptvHomeState extends State<IptvHome> {
     try {
       final frame = await player.screenshot();
       if (!mounted || frame == null) return;
+      // Release the previous freeze frame before storing the new one so its
+      // decoded bitmap doesn't linger in the global image cache.
+      _clearFreezeFrame();
       lastFrame = frame;
     } catch (_) {}
+  }
+
+  // Drop the current freeze frame and evict its decoded bitmap from the global
+  // image cache. Image.memory keys the cache by the byte buffer, so without an
+  // explicit evict each captured frame stays resident for the life of the app.
+  void _clearFreezeFrame() {
+    final frame = lastFrame;
+    if (frame == null) return;
+    PaintingBinding.instance.imageCache.evict(MemoryImage(frame));
+    lastFrame = null;
   }
 
   Future<void> _pollBitrate() async {
@@ -817,7 +839,7 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectTimer?.cancel();
     reconnecting = false;
     reconnectAttempts = 0;
-    lastFrame = null;
+    _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
     setState(() {
@@ -909,7 +931,7 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectTimer?.cancel();
     reconnecting = false;
     reconnectAttempts = 0;
-    lastFrame = null;
+    _clearFreezeFrame();
     streamUrlController.clear();
     try {
       await player.stop();
@@ -1072,6 +1094,11 @@ class _IptvHomeState extends State<IptvHome> {
       'hwdec': 'auto',
       'interpolation': 'no',
       'video-sync': 'audio',
+      // media_kit sizes mpv's backward demuxer cache from `bufferSize` too, so
+      // it grows toward tens of MiB the entire time a stream plays. Live IPTV
+      // can never seek backward, so that buffer is pure wasted RAM that makes
+      // memory climb steadily during playback. Cap it hard.
+      'demuxer-max-back-bytes': (4 * 1024 * 1024).toString(),
     };
 
     for (final option in options.entries) {
