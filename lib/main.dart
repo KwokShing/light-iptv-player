@@ -3227,10 +3227,13 @@ class _ChannelLogo extends StatelessWidget {
                 url!,
                 fit: BoxFit.contain,
                 alignment: Alignment.center,
-                // Decode at roughly the displayed size (logo box is 46px, less
-                // padding) to cut memory and decode cost for long lists.
+                // Decode at roughly the displayed size to cut memory and decode
+                // cost for long lists. Only the width is constrained: giving
+                // both cacheWidth and cacheHeight makes Flutter decode to those
+                // exact pixels, squashing non-square logos into a square. With
+                // width alone the height scales proportionally, so BoxFit.contain
+                // renders the logo at its true aspect ratio.
                 cacheWidth: 96,
-                cacheHeight: 96,
                 filterQuality: FilterQuality.low,
                 gaplessPlayback: true,
                 // Remember which logos have rendered so we can show them
