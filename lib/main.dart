@@ -211,10 +211,23 @@ class _IptvHomeState extends State<IptvHome> {
   StreamSubscription<bool>? playingSubscription;
   StreamSubscription<Duration>? positionSubscription;
   StreamSubscription<Duration>? durationSubscription;
+  StreamSubscription<String>? errorSubscription;
+  StreamSubscription<PlayerLog>? logSubscription;
   Timer? bitrateTimer;
   Timer? reconnectTimer;
+  // Watchdog for the initial connection: if a freshly opened channel never
+  // starts playing within this window it's treated as unreachable and stopped,
+  // instead of hanging (and hammering a dead stream with reconnect attempts,
+  // which can take the native player process down with it).
+  Timer? connectTimer;
+  static const _connectTimeout = Duration(seconds: 15);
   int reconnectAttempts = 0;
   bool reconnecting = false;
+  // Set true once a channel has actually started rendering. Distinguishes a
+  // legitimate mid-stream segment boundary (reconnect is desirable) from a
+  // stream that could never connect in the first place (reconnecting forever,
+  // and screenshotting a frameless output, is what crashes the process).
+  bool _everPlayed = false;
   Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
@@ -347,8 +360,11 @@ class _IptvHomeState extends State<IptvHome> {
     playingSubscription?.cancel();
     positionSubscription?.cancel();
     durationSubscription?.cancel();
+    errorSubscription?.cancel();
+    logSubscription?.cancel();
     bitrateTimer?.cancel();
     reconnectTimer?.cancel();
+    connectTimer?.cancel();
     cursorHideTimer?.cancel();
     playerFocusNode.dispose();
     streamUrlController.dispose();
@@ -361,6 +377,11 @@ class _IptvHomeState extends State<IptvHome> {
     final nextPlayer = Player(
       configuration: const PlayerConfiguration(
         title: 'Light IPTV Player',
+        // Surface mpv's own logs so a native crash leaves a breadcrumb trail in
+        // the console right up to the moment it dies. `v` (verbose) captures
+        // stream open, TLS, demuxer probe and codec init without the extreme
+        // volume of full debug.
+        logLevel: MPVLogLevel.v,
         // Forward read-ahead cache. media_kit turns this into mpv's
         // `demuxer-max-bytes`. 32 MiB is plenty of buffering for IPTV while
         // keeping the resident cache modest. (It also seeds
@@ -371,7 +392,12 @@ class _IptvHomeState extends State<IptvHome> {
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
-        hwdec: 'auto',
+        // `auto-copy` keeps hardware decoding but copies decoded frames back to
+        // system memory instead of sharing a D3D11 texture directly with ANGLE.
+        // The zero-copy interop path (`auto`) crashes the native process on
+        // Windows for some IPTV codecs/resolutions; the copy path is far more
+        // robust at a small upload cost.
+        hwdec: 'auto-copy',
         enableHardwareAcceleration: true,
       ),
     );
@@ -397,6 +423,19 @@ class _IptvHomeState extends State<IptvHome> {
     completedSubscription = player.stream.completed.listen((completed) async {
       if (!completed) return;
       if (!mounted || nowPlaying == null || reconnecting) return;
+      // If the stream never rendered a single frame, this "completed" is a
+      // failed connection (bad IP, dead server, geo-block), not a segment
+      // boundary. Don't loop-reconnect or screenshot a frameless output —
+      // that's exactly what wedges/crashes the native player. Fail cleanly.
+      if (!_everPlayed) {
+        final name = nowPlaying?.name;
+        await _stopPlayback();
+        if (mounted && name != null) {
+          _showMessage('Could not connect to "$name". The stream may be '
+              'offline or blocked for your network.');
+        }
+        return;
+      }
       reconnecting = true;
       // mpv runs with keep-open=yes, so the last frame is still held on the
       // output here. Grab it once and freeze it so the reload doesn't flash
@@ -416,7 +455,12 @@ class _IptvHomeState extends State<IptvHome> {
         setState(() => isPlaying = playing);
       }
       if (!playing) return;
+      _everPlayed = true;
       reconnectAttempts = 0;
+      // A confirmed play means the connection is alive; cancel the startup
+      // watchdog so it can't later mistake this stream for unreachable.
+      connectTimer?.cancel();
+      connectTimer = null;
       if (reconnecting) {
         setState(() => reconnecting = false);
         // The new segment is rendering, so the frozen frame is no longer
@@ -441,6 +485,25 @@ class _IptvHomeState extends State<IptvHome> {
     durationSubscription = player.stream.duration.listen((value) {
       if (!mounted) return;
       setState(() => duration = value);
+    });
+    // Surface hard playback errors (failed opens, network aborts) instead of
+    // silently spinning. If nothing ever played, stop cleanly and tell the
+    // user rather than leaving the reconnect machinery to hammer a dead URL.
+    errorSubscription = player.stream.error.listen((error) async {
+      debugPrint('Player error: $error');
+      if (!mounted || nowPlaying == null || _everPlayed || reconnecting) return;
+      final name = nowPlaying?.name;
+      await _stopPlayback();
+      if (mounted && name != null) {
+        _showMessage('Could not play "$name": $error');
+      }
+    });
+    // Raw mpv logs. Printed verbatim so that if the native player segfaults
+    // (surfaces to `flutter run` only as "Lost connection to device"), the last
+    // lines here point at the exact failing operation — decoder init, TLS
+    // handshake, demuxer probe, etc.
+    logSubscription = player.stream.log.listen((log) {
+      debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
     });
   }
 
@@ -839,11 +902,57 @@ class _IptvHomeState extends State<IptvHome> {
     if (cursorHidden) setState(() => cursorHidden = false);
   }
 
+  // Returns false only when the stream is a format known to crash the bundled
+  // ffmpeg/mpv (currently MPEG-DASH). Fetches just a small prefix of the
+  // response with a short timeout so a healthy stream isn't delayed much, and
+  // returns true (play it) on any uncertainty so we never block a good channel
+  // on a flaky probe.
+  Future<bool> _isNativeSafeStream(String url) async {
+    final uri = Uri.tryParse(url);
+    // Only HTTP(S) endpoints can serve a DASH manifest; let mpv handle
+    // everything else (file, udp, rtp, ...) directly.
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+      return true;
+    }
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', uri)
+        ..followRedirects = true
+        ..headers['User-Agent'] = 'Mozilla/5.0'
+        ..headers['Range'] = 'bytes=0-4095';
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 6));
+      final contentType = (response.headers['content-type'] ?? '')
+          .toLowerCase();
+      // Read only a small prefix, then stop pulling from the socket so we never
+      // start downloading an actual live stream here.
+      final bytes = <int>[];
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length >= 4096) break;
+      }
+      final head = utf8.decode(
+        bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes,
+        allowMalformed: true,
+      );
+      final looksDash =
+          contentType.contains('dash+xml') ||
+          head.contains('<MPD') ||
+          head.contains('urn:mpeg:dash');
+      return !looksDash;
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> _play(Channel channel) async {
     final request = ++playbackRequest;
     reconnectTimer?.cancel();
+    connectTimer?.cancel();
     reconnecting = false;
     reconnectAttempts = 0;
+    _everPlayed = false;
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
@@ -857,9 +966,48 @@ class _IptvHomeState extends State<IptvHome> {
     });
     await player.stop();
     if (!mounted || request != playbackRequest) return;
+
+    // Pre-flight the stream before handing it to the native player. ffmpeg's
+    // MPEG-DASH demuxer segfaults the entire native process on some manifests
+    // (typically IP-blocked or malformed ones) — a native crash that surfaces
+    // only as "Lost connection to device" and cannot be caught from Dart. So
+    // we sniff the response ourselves and refuse DASH cleanly instead of
+    // letting it take the app down. Best-effort: any probe failure or timeout
+    // falls through to normal playback, so a healthy stream is never blocked.
+    var nativeSafe = true;
+    try {
+      nativeSafe = await _isNativeSafeStream(channel.url);
+    } catch (_) {}
+    if (!mounted || request != playbackRequest) return;
+    if (!nativeSafe) {
+      final name = nowPlaying?.name;
+      await _stopPlayback();
+      if (mounted && name != null) {
+        _showMessage(
+          '"$name" is an MPEG-DASH stream this player can\'t open safely, so '
+          'it was skipped to avoid crashing.',
+        );
+      }
+      return;
+    }
+
     await _applyPlaybackOptions();
     if (!mounted || request != playbackRequest) return;
     await player.open(Media(channel.url));
+    // Start the connection watchdog. If this exact request never reaches the
+    // "playing" state within the timeout, the stream is unreachable — stop and
+    // report it rather than hanging or reconnecting into a native crash.
+    connectTimer?.cancel();
+    connectTimer = Timer(_connectTimeout, () {
+      if (!mounted || request != playbackRequest || _everPlayed) return;
+      final name = nowPlaying?.name;
+      _stopPlayback();
+      if (mounted && name != null) {
+        _showMessage('Could not connect to "$name" within '
+            '${_connectTimeout.inSeconds}s. The stream may be offline or '
+            'blocked for your network.');
+      }
+    });
   }
 
   void _scheduleReconnect() {
@@ -934,8 +1082,10 @@ class _IptvHomeState extends State<IptvHome> {
   Future<void> _stopPlayback() async {
     playbackRequest++;
     reconnectTimer?.cancel();
+    connectTimer?.cancel();
     reconnecting = false;
     reconnectAttempts = 0;
+    _everPlayed = false;
     _clearFreezeFrame();
     streamUrlController.clear();
     try {
@@ -1096,7 +1246,7 @@ class _IptvHomeState extends State<IptvHome> {
     // are very expensive at 4K60 and noticeably delay first frame.
     _interpolationConfigured = false;
     final options = {
-      'hwdec': 'auto',
+      'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
       // media_kit sizes mpv's backward demuxer cache from `bufferSize` too, so
