@@ -229,10 +229,11 @@ class _IptvHomeState extends State<IptvHome> {
   // stream that could never connect in the first place (reconnecting forever,
   // and screenshotting a frameless output, is what crashes the process).
   bool _everPlayed = false;
-  // Set when the connection watchdog fires before playback ever starts; shown
-  // as "Timed out" in the control bar. Cleared on a new open, on stop, and if
-  // playback eventually starts.
-  bool _timedOut = false;
+  // Non-null when playback failed before it ever started; shown verbatim in the
+  // control bar. 'Load error' for streams we won't hand to the bundled libmpv
+  // (MPEG-DASH crashes it), 'Timed out' when the connection watchdog fires.
+  // Cleared on a new open, on stop, and if playback eventually starts.
+  String? _failureLabel;
   Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
@@ -432,11 +433,15 @@ class _IptvHomeState extends State<IptvHome> {
     completedSubscription = player.stream.completed.listen((completed) async {
       if (!completed) return;
       if (!mounted || nowPlaying == null || reconnecting) return;
-      // If the stream never rendered a single frame, this "completed" is a
-      // failed/aborted open (bad IP, dead server, unsupported format), not a
-      // segment boundary. Don't tear playback down here — leave the connection
-      // watchdog to surface "Timed out" in the control bar after its window.
-      if (!_everPlayed) return;
+      // Ignore the completed event that our own player.stop() triggers once a
+      // failure has already been recorded.
+      if (_failureLabel != null) return;
+      // Never rendered a frame: this "completed" is a failed/aborted open, not
+      // a segment boundary. Treat it as a load failure immediately.
+      if (!_everPlayed) {
+        _failLoad();
+        return;
+      }
       reconnecting = true;
       // mpv runs with keep-open=yes, so the last frame is still held on the
       // output here. Grab it once and freeze it so the reload doesn't flash
@@ -478,17 +483,19 @@ class _IptvHomeState extends State<IptvHome> {
       if (!mounted) return;
       setState(() => duration = value);
     });
-    // Log hard playback errors (failed opens, network aborts). Failures before
-    // playback ever starts are intentionally not torn down here — the 15s
-    // connection watchdog surfaces "Timed out" in the control bar instead, so
-    // the behaviour is the same whether a stream errors fast or just hangs.
+    // Any hard playback error before the stream has started is treated as a
+    // load failure right away (no waiting for the 15s watchdog). Errors after
+    // playback is underway are left to the reconnect logic.
     errorSubscription = player.stream.error.listen((error) {
       debugPrint('Player error: $error');
+      if (!mounted || nowPlaying == null || _everPlayed || reconnecting) return;
+      _failLoad();
     });
-    // Raw mpv logs. Printed verbatim so that if the native player segfaults
-    // (surfaces to `flutter run` only as "Lost connection to device"), the last
-    // lines here point at the exact failing operation — decoder init, TLS
-    // handshake, demuxer probe, etc.
+    // Raw mpv logs, printed for diagnostics only. NOTE: these "[mpv:error]"
+    // lines are not treated as load failures — only genuine "Player error"
+    // events (player.stream.error, handled above) are. mpv logs plenty of
+    // benign/transient errors (GL init, demuxer probes) that don't mean the
+    // stream failed.
     logSubscription = player.stream.log.listen((log) {
       debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
     });
@@ -520,7 +527,7 @@ class _IptvHomeState extends State<IptvHome> {
 
   Future<void> _pollBitrate() async {
     final platform = player.platform;
-    if (platform == null || nowPlaying == null || _timedOut) return;
+    if (platform == null || nowPlaying == null || _failureLabel != null) return;
     try {
       final bitrateValue =
           await (platform as dynamic).getProperty('video-bitrate') as String?;
@@ -889,6 +896,50 @@ class _IptvHomeState extends State<IptvHome> {
     if (cursorHidden) setState(() => cursorHidden = false);
   }
 
+  // Returns false when the stream is a format the bundled libmpv can't open
+  // without crashing the whole process (currently MPEG-DASH). Fetches a small
+  // prefix with a short timeout so a healthy stream isn't delayed much, and
+  // returns true (play it) on any uncertainty so a flaky probe never blocks a
+  // good channel.
+  Future<bool> _isNativeSafeStream(String url) async {
+    final uri = Uri.tryParse(url);
+    // Only HTTP(S) endpoints can serve a DASH manifest; let mpv handle
+    // everything else (file, udp, rtp, ...) directly.
+    if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
+      return true;
+    }
+    final client = http.Client();
+    try {
+      final request = http.Request('GET', uri)
+        ..followRedirects = true
+        ..headers['User-Agent'] = 'Mozilla/5.0'
+        ..headers['Range'] = 'bytes=0-4095';
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 6));
+      final contentType = (response.headers['content-type'] ?? '')
+          .toLowerCase();
+      // Read only a small prefix, then stop pulling from the socket so we never
+      // start downloading an actual live stream here.
+      final bytes = <int>[];
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length >= 4096) break;
+      }
+      final head = utf8.decode(
+        bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes,
+        allowMalformed: true,
+      );
+      final looksDash =
+          contentType.contains('dash+xml') ||
+          head.contains('<MPD') ||
+          head.contains('urn:mpeg:dash');
+      return !looksDash;
+    } finally {
+      client.close();
+    }
+  }
+
   Future<void> _play(Channel channel) async {
     final request = ++playbackRequest;
     reconnectTimer?.cancel();
@@ -896,7 +947,7 @@ class _IptvHomeState extends State<IptvHome> {
     reconnecting = false;
     reconnectAttempts = 0;
     _everPlayed = false;
-    _timedOut = false;
+    _failureLabel = null;
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
@@ -910,20 +961,37 @@ class _IptvHomeState extends State<IptvHome> {
     });
     await player.stop();
     if (!mounted || request != playbackRequest) return;
+
+    // The bundled libmpv's ffmpeg segfaults the whole process on some
+    // MPEG-DASH manifests (a native crash we can't catch). Sniff the response
+    // first: if it's DASH, don't hand it to mpv — show "Load error" in the
+    // control bar. Best-effort; a probe failure falls through to a normal open
+    // so healthy streams are never blocked.
+    var nativeSafe = true;
+    try {
+      nativeSafe = await _isNativeSafeStream(channel.url);
+    } catch (_) {}
+    if (!mounted || request != playbackRequest) return;
+    if (!nativeSafe) {
+      setState(() => _failureLabel = 'Load error');
+      try {
+        await player.stop();
+      } catch (_) {}
+      return;
+    }
+
     await _applyPlaybackOptions();
     if (!mounted || request != playbackRequest) return;
     await player.open(Media(channel.url));
-    // Start the connection watchdog. If this exact request never reaches the
-    // "playing" state within the timeout, surface "Timed out" in the control
-    // bar. Playback isn't torn down, so if the stream does eventually come in,
-    // the "playing" event clears the flag and normal info takes over.
+    // Connection watchdog: if this request never actually starts playing within
+    // the window, surface "Timed out" and stop the player to free resources.
     connectTimer?.cancel();
     connectTimer = Timer(_connectTimeout, () async {
       if (!mounted || request != playbackRequest || _everPlayed) return;
-      setState(() => _timedOut = true);
+      setState(() => _failureLabel = 'Timed out');
       // Free decoder/network resources instead of letting mpv keep hammering a
-      // dead stream. nowPlaying is kept so the control bar still shows
-      // "Timed out"; a completed/error event here is ignored (never played).
+      // dead stream. nowPlaying is kept so the control bar still shows the
+      // status; a completed/error event here is ignored (never played).
       try {
         await player.stop();
       } catch (_) {}
@@ -939,13 +1007,27 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectAttempts = 0;
     connectTimer?.cancel();
     connectTimer = null;
-    final needsRebuild = _timedOut || reconnecting;
-    _timedOut = false;
+    final needsRebuild = _failureLabel != null || reconnecting;
+    _failureLabel = null;
     if (reconnecting) {
       reconnecting = false;
       _clearFreezeFrame();
     }
     if (needsRebuild && mounted) setState(() {});
+  }
+
+  // Marks the current channel as failed to load: shows "Load error" in the
+  // control bar, cancels the connection watchdog, and stops the player to free
+  // decoder/network resources. nowPlaying is kept so the status stays visible.
+  // No-op once playback has started or a failure is already recorded.
+  void _failLoad() {
+    if (!mounted || nowPlaying == null || _everPlayed || _failureLabel != null) {
+      return;
+    }
+    connectTimer?.cancel();
+    connectTimer = null;
+    setState(() => _failureLabel = 'Load error');
+    unawaited(player.stop().catchError((_) {}));
   }
 
   void _scheduleReconnect() {
@@ -1024,7 +1106,7 @@ class _IptvHomeState extends State<IptvHome> {
     reconnecting = false;
     reconnectAttempts = 0;
     _everPlayed = false;
-    _timedOut = false;
+    _failureLabel = null;
     _clearFreezeFrame();
     streamUrlController.clear();
     try {
@@ -1150,7 +1232,7 @@ class _IptvHomeState extends State<IptvHome> {
 
   String get playbackInfo {
     if (nowPlaying == null) return 'No video loaded';
-    if (_timedOut) return 'Timed out';
+    if (_failureLabel != null) return _failureLabel!;
 
     final track = selectedTrack.video;
     final width = videoParams.dw ?? videoParams.w ?? track.w;
