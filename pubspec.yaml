@@ -43,6 +43,10 @@ dependencies:
   window_manager: ^0.5.1
   charset_converter: ^2.4.0
   package_info_plus: ^9.0.0
+  # DASH ClearKey playback: MPD rewriting + CENC (AES-128-CTR) segment
+  # decryption run in a local proxy so libmpv only ever sees clear fMP4.
+  xml: ^6.5.0
+  pointycastle: ^3.9.1
 
 dev_dependencies:
   flutter_test:

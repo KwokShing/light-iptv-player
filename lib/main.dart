@@ -14,6 +14,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'dash_clearkey.dart';
 import 'update_service.dart';
 
 const sourcesStorageKey = 'light-iptv-player:sources:flutter:v1';
@@ -65,6 +66,9 @@ class Channel {
     required this.url,
     required this.group,
     this.logo,
+    this.manifestType,
+    this.licenseType,
+    this.licenseKey,
   });
 
   final String name;
@@ -72,11 +76,34 @@ class Channel {
   final String group;
   final String? logo;
 
+  // DRM / adaptive-streaming hints parsed from #KODIPROP lines that precede the
+  // stream URL in the playlist. These mirror Kodi's inputstream.adaptive props:
+  //   inputstream.adaptive.manifest_type  -> 'mpd' (MPEG-DASH) or 'hls'
+  //   inputstream.adaptive.license_type   -> e.g. 'clearkey'
+  //   inputstream.adaptive.license_key    -> for clearkey, 'KID:KEY' hex pairs
+  final String? manifestType;
+  final String? licenseType;
+  final String? licenseKey;
+
+  // True when the playlist explicitly marks this entry as MPEG-DASH.
+  bool get isDash => (manifestType ?? '').toLowerCase() == 'mpd';
+
+  // ClearKey key pairs (kidHex -> keyHex) parsed from license_key, empty when
+  // none/unusable.
+  Map<String, String> get clearKeys =>
+      licenseKey == null ? const {} : parseClearKeyLicense(licenseKey!);
+
+  // True when this is a DASH stream we can decrypt via the local ClearKey proxy.
+  bool get isEncryptedDash => isDash && clearKeys.isNotEmpty;
+
   Map<String, dynamic> toJson() => {
     'name': name,
     'url': url,
     'group': group,
     'logo': logo,
+    if (manifestType != null) 'manifestType': manifestType,
+    if (licenseType != null) 'licenseType': licenseType,
+    if (licenseKey != null) 'licenseKey': licenseKey,
   };
 
   factory Channel.fromJson(Map<String, dynamic> json) => Channel(
@@ -84,6 +111,9 @@ class Channel {
     url: json['url'] as String? ?? '',
     group: json['group'] as String? ?? ungroupedGroup,
     logo: json['logo'] as String?,
+    manifestType: json['manifestType'] as String?,
+    licenseType: json['licenseType'] as String?,
+    licenseKey: json['licenseKey'] as String?,
   );
 }
 
@@ -196,6 +226,13 @@ class IptvHome extends StatefulWidget {
 class _IptvHomeState extends State<IptvHome> {
   late Player player;
   late VideoController videoController;
+  // Local decrypting proxy for ClearKey-protected MPEG-DASH. When active, mpv
+  // is pointed at its rewritten local manifest instead of the origin URL.
+  final DashClearKeyProxy _clearKeyProxy = DashClearKeyProxy();
+  // The URL actually handed to mpv for the current channel: the origin URL for
+  // plain streams, or the proxy's local manifest for ClearKey DASH. Used by the
+  // reconnect path so it reloads the right source.
+  String _activeStreamUrl = '';
   final TextEditingController streamUrlController = TextEditingController();
   final ScrollController channelScrollController = ScrollController();
   List<PlaylistSource> sources = [];
@@ -216,12 +253,10 @@ class _IptvHomeState extends State<IptvHome> {
   StreamSubscription<PlayerLog>? logSubscription;
   Timer? bitrateTimer;
   Timer? reconnectTimer;
-  // Watchdog for the initial connection: if a freshly opened channel never
-  // starts playing within this window it's treated as unreachable and stopped,
-  // instead of hanging (and hammering a dead stream with reconnect attempts,
-  // which can take the native player process down with it).
+  // Retained only so existing cancel() calls stay valid; the initial-connection
+  // watchdog that used to time out a stream after 15s has been removed so slow
+  // starts (proxied DASH, slow CDNs) are never killed early.
   Timer? connectTimer;
-  static const _connectTimeout = Duration(seconds: 15);
   int reconnectAttempts = 0;
   bool reconnecting = false;
   // Set true once a channel has actually started rendering. Distinguishes a
@@ -230,9 +265,8 @@ class _IptvHomeState extends State<IptvHome> {
   // and screenshotting a frameless output, is what crashes the process).
   bool _everPlayed = false;
   // Non-null when playback failed before it ever started; shown verbatim in the
-  // control bar. 'Load error' for streams we won't hand to the bundled libmpv
-  // (MPEG-DASH crashes it), 'Timed out' when the connection watchdog fires.
-  // Cleared on a new open, on stop, and if playback eventually starts.
+  // control bar. 'Load error' for a hard open/demux failure. Cleared on a new
+  // open, on stop, and if playback eventually starts.
   String? _failureLabel;
   Uint8List? lastFrame;
   int? videoBitrate;
@@ -375,6 +409,7 @@ class _IptvHomeState extends State<IptvHome> {
     playerFocusNode.dispose();
     streamUrlController.dispose();
     channelScrollController.dispose();
+    _clearKeyProxy.dispose();
     player.dispose();
     super.dispose();
   }
@@ -962,15 +997,41 @@ class _IptvHomeState extends State<IptvHome> {
     await player.stop();
     if (!mounted || request != playbackRequest) return;
 
+    // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the
+    // stream through the local proxy which fetches, decrypts (AES-128-CTR) and
+    // rewrites segments to clear fMP4. mpv then plays the proxy's local
+    // manifest. Plain streams keep using their origin URL directly.
+    var streamUrl = channel.url;
+    if (channel.isEncryptedDash) {
+      try {
+        streamUrl = await _clearKeyProxy.start(channel.url, channel.clearKeys);
+        debugPrint('ClearKey proxy started: $streamUrl');
+      } catch (error) {
+        debugPrint('ClearKey proxy failed to start: $error');
+        if (!mounted || request != playbackRequest) return;
+        setState(() => _failureLabel = 'Load error');
+        return;
+      }
+    } else {
+      await _clearKeyProxy.stop();
+    }
+    if (!mounted || request != playbackRequest) return;
+
     // The bundled libmpv's ffmpeg segfaults the whole process on some
     // MPEG-DASH manifests (a native crash we can't catch). Sniff the response
     // first: if it's DASH, don't hand it to mpv — show "Load error" in the
     // control bar. Best-effort; a probe failure falls through to a normal open
     // so healthy streams are never blocked.
+    //
+    // Skip the guard for streams we deliberately open: DASH declared via
+    // #KODIPROP (played through the ClearKey proxy) and the proxy's own local
+    // manifest.
     var nativeSafe = true;
-    try {
-      nativeSafe = await _isNativeSafeStream(channel.url);
-    } catch (_) {}
+    if (!channel.isDash) {
+      try {
+        nativeSafe = await _isNativeSafeStream(channel.url);
+      } catch (_) {}
+    }
     if (!mounted || request != playbackRequest) return;
     if (!nativeSafe) {
       setState(() => _failureLabel = 'Load error');
@@ -980,27 +1041,21 @@ class _IptvHomeState extends State<IptvHome> {
       return;
     }
 
+    _activeStreamUrl = streamUrl;
     await _applyPlaybackOptions();
     if (!mounted || request != playbackRequest) return;
-    await player.open(Media(channel.url));
-    // Connection watchdog: if this request never actually starts playing within
-    // the window, surface "Timed out" and stop the player to free resources.
+    await player.open(Media(streamUrl));
+    // No connection watchdog: slow-starting streams (e.g. DASH going through
+    // the local decrypting proxy, or channels behind slow CDNs) can take a
+    // while to render the first frame, and we don't want to kill them early.
+    // A genuine hard failure still surfaces via the player error/completed
+    // handlers.
     connectTimer?.cancel();
-    connectTimer = Timer(_connectTimeout, () async {
-      if (!mounted || request != playbackRequest || _everPlayed) return;
-      setState(() => _failureLabel = 'Timed out');
-      // Free decoder/network resources instead of letting mpv keep hammering a
-      // dead stream. nowPlaying is kept so the control bar still shows the
-      // status; a completed/error event here is ignored (never played).
-      try {
-        await player.stop();
-      } catch (_) {}
-    });
   }
 
   // Marks the current stream as genuinely playing (decoded frames/advancing
-  // position). Cancels the connection watchdog, clears any "Timed out" state,
-  // and — if this confirmation is a reconnect resuming — drops the freeze frame.
+  // position). Clears any failure state, and — if this confirmation is a
+  // reconnect resuming — drops the freeze frame.
   // Cheap and idempotent, so it's safe to call from high-frequency streams.
   void _confirmPlaybackStarted() {
     _everPlayed = true;
@@ -1058,8 +1113,13 @@ class _IptvHomeState extends State<IptvHome> {
       reconnecting = false;
       return;
     }
+    // For ClearKey DASH this is the proxy's local manifest URL (still valid, as
+    // the proxy keeps running); for plain streams it's the origin URL.
+    final reloadUrl = _activeStreamUrl.isNotEmpty
+        ? _activeStreamUrl
+        : channel.url;
     debugPrint(
-      'Reconnecting stream (attempt $reconnectAttempts): ${channel.url}',
+      'Reconnecting stream (attempt $reconnectAttempts): $reloadUrl',
     );
     try {
       await _applyPlaybackOptions();
@@ -1077,7 +1137,7 @@ class _IptvHomeState extends State<IptvHome> {
         try {
           await (platform as dynamic).command([
             'loadfile',
-            channel.url,
+            reloadUrl,
             'replace',
           ]);
           await player.play();
@@ -1088,7 +1148,7 @@ class _IptvHomeState extends State<IptvHome> {
       }
       if (!replaced) {
         if (!mounted || request != playbackRequest) return;
-        await player.open(Media(channel.url));
+        await player.open(Media(reloadUrl));
       }
     } catch (error) {
       debugPrint('Reconnect failed: $error');
@@ -1107,7 +1167,9 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectAttempts = 0;
     _everPlayed = false;
     _failureLabel = null;
+    _activeStreamUrl = '';
     _clearFreezeFrame();
+    unawaited(_clearKeyProxy.stop());
     streamUrlController.clear();
     try {
       await player.stop();
@@ -1258,6 +1320,12 @@ class _IptvHomeState extends State<IptvHome> {
     return '${kbps.toStringAsFixed(0)} Kbps';
   }
 
+  // Value for mpv's `demuxer-lavf-o`. Left empty: ClearKey DASH is decrypted
+  // by the local proxy (which strips all encryption boxes) before mpv sees it,
+  // so no FFmpeg-side `decryption_key` is needed. FFmpeg's `decryption_key`
+  // doesn't propagate to the DASH demuxer's child segments anyway.
+  String _lavfOptionsFor(Channel? channel) => '';
+
   Future<void> _applyPlaybackOptions() async {
     final platform = player.platform;
     if (platform == null) return;
@@ -1276,6 +1344,12 @@ class _IptvHomeState extends State<IptvHome> {
       // can never seek backward, so that buffer is pure wasted RAM that makes
       // memory climb steadily during playback. Cap it hard.
       'demuxer-max-back-bytes': (4 * 1024 * 1024).toString(),
+      // ClearKey DRM: hand the content key to FFmpeg's demuxer so it can
+      // decrypt CENC (AES-128-CTR) fragments inline. Set to empty for
+      // unprotected streams so a key from a previous channel never lingers.
+      // MPEG-CENC content keys are passed as a bare hex string via
+      // `decryption_key`.
+      'demuxer-lavf-o': _lavfOptionsFor(nowPlaying),
     };
 
     for (final option in options.entries) {
@@ -2556,11 +2630,45 @@ List<Channel> parsePlaylist(String text) {
   var pendingGroup = ungroupedGroup;
   String? pendingLogo;
   String? extGrp;
+  String? pendingManifestType;
+  String? pendingLicenseType;
+  String? pendingLicenseKey;
+
+  void resetPending() {
+    pendingName = '';
+    pendingGroup = ungroupedGroup;
+    pendingLogo = null;
+    extGrp = null;
+    pendingManifestType = null;
+    pendingLicenseType = null;
+    pendingLicenseKey = null;
+  }
 
   for (final line in lines) {
     if (line.isEmpty || line == '#EXTM3U') continue;
     if (line.startsWith('#EXTGRP:')) {
       extGrp = line.substring('#EXTGRP:'.length).trim();
+      continue;
+    }
+    // Kodi-style DRM/adaptive hints, e.g.
+    //   #KODIPROP:inputstream.adaptive.manifest_type=mpd
+    //   #KODIPROP:inputstream.adaptive.license_type=clearkey
+    //   #KODIPROP:inputstream.adaptive.license_key=<kid>:<key>
+    // Applied to the next stream URL that follows.
+    if (line.startsWith('#KODIPROP:')) {
+      final body = line.substring('#KODIPROP:'.length).trim();
+      final eq = body.indexOf('=');
+      if (eq > 0) {
+        final key = body.substring(0, eq).trim().toLowerCase();
+        final value = body.substring(eq + 1).trim();
+        if (key.endsWith('manifest_type')) {
+          pendingManifestType = value;
+        } else if (key.endsWith('license_type')) {
+          pendingLicenseType = value;
+        } else if (key.endsWith('license_key')) {
+          pendingLicenseKey = value;
+        }
+      }
       continue;
     }
     if (line.startsWith('#EXTINF')) {
@@ -2579,12 +2687,12 @@ List<Channel> parsePlaylist(String text) {
               ? ungroupedGroup
               : pendingGroup.trim(),
           logo: pendingLogo,
+          manifestType: pendingManifestType,
+          licenseType: pendingLicenseType,
+          licenseKey: pendingLicenseKey,
         ),
       );
-      pendingName = '';
-      pendingGroup = ungroupedGroup;
-      pendingLogo = null;
-      extGrp = null;
+      resetPending();
     }
   }
   return channels;

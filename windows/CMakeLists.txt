@@ -106,3 +106,20 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# === Override the bundled libmpv ===
+# media_kit_libs_windows_video ships an older (2023-09-24) libmpv-2.dll that
+# can't demux MPEG-DASH. Copy our newer build over it *after* the plugin's
+# bundled libraries are installed above, so the install step's final result is
+# the DASH-capable DLL. (A POST_BUILD copy would be clobbered by the install
+# step, so this must be an install rule ordered after PLUGIN_BUNDLED_LIBRARIES.)
+set(CUSTOM_LIBMPV "${CMAKE_CURRENT_SOURCE_DIR}/../libmpv-2.dll")
+if(EXISTS "${CUSTOM_LIBMPV}")
+  message(STATUS "Overriding bundled libmpv-2.dll with ${CUSTOM_LIBMPV}")
+  install(FILES "${CUSTOM_LIBMPV}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+    COMPONENT Runtime)
+else()
+  message(WARNING "Custom libmpv-2.dll not found at ${CUSTOM_LIBMPV}; "
+    "using media_kit's bundled (non-DASH) build.")
+endif()
