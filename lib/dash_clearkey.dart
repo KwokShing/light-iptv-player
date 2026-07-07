@@ -602,6 +602,33 @@ _MpdRewriteResult _rewriteMpd(
     if (isTrick || isText) as.parent?.children.remove(as);
   }
 
+  // Force the lowest-bandwidth video Representation. ffmpeg's DASH demuxer is
+  // not adaptive — it locks onto a single representation (mpv defaults to the
+  // highest resolution). Since every segment is fully downloaded, decrypted and
+  // re-served through this proxy, a high-bitrate rendition produces large
+  // segments that can't be fetched within ffmpeg's open/read window, causing
+  // "Error when loading first fragment". The lightest rendition keeps segments
+  // small enough to load reliably.
+  for (final as in doc.findAllElements('AdaptationSet').toList()) {
+    final reps = as.findElements('Representation').toList();
+    if (reps.length <= 1) continue;
+    final mime = (as.getAttribute('mimeType') ?? '').toLowerCase();
+    final contentType = (as.getAttribute('contentType') ?? '').toLowerCase();
+    final isVideo = mime.startsWith('video') ||
+        contentType == 'video' ||
+        reps.any((r) =>
+            (r.getAttribute('mimeType') ?? '').toLowerCase().startsWith('video'));
+    if (!isVideo) continue;
+    reps.sort((a, b) {
+      final ba = int.tryParse(a.getAttribute('bandwidth') ?? '0') ?? 0;
+      final bb = int.tryParse(b.getAttribute('bandwidth') ?? '0') ?? 0;
+      return ba.compareTo(bb);
+    });
+    for (var i = 1; i < reps.length; i++) {
+      reps[i].parent?.children.remove(reps[i]);
+    }
+  }
+
   String proxied(String base, String value, int token) {
     final abs = _resolveKeepingTemplates(base, value);
     return '$proxyBase/seg?r=$token&u=${_encodePreservingTemplates(abs)}';

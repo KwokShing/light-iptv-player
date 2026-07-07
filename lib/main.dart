@@ -474,6 +474,7 @@ class _IptvHomeState extends State<IptvHome> {
       // Never rendered a frame: this "completed" is a failed/aborted open, not
       // a segment boundary. Treat it as a load failure immediately.
       if (!_everPlayed) {
+        debugPrint('completed before first frame -> Load error');
         _failLoad();
         return;
       }
@@ -524,6 +525,7 @@ class _IptvHomeState extends State<IptvHome> {
     errorSubscription = player.stream.error.listen((error) {
       debugPrint('Player error: $error');
       if (!mounted || nowPlaying == null || _everPlayed || reconnecting) return;
+      debugPrint('player error before first frame -> Load error');
       _failLoad();
     });
     // Raw mpv logs, printed for diagnostics only. NOTE: these "[mpv:error]"
@@ -986,6 +988,11 @@ class _IptvHomeState extends State<IptvHome> {
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
+    debugPrint('  channel drm: manifestType=${channel.manifestType} '
+        'licenseType=${channel.licenseType} '
+        'licenseKey=${channel.licenseKey} '
+        'isDash=${channel.isDash} clearKeys=${channel.clearKeys.length} '
+        'isEncryptedDash=${channel.isEncryptedDash}');
     setState(() {
       nowPlaying = channel;
       videoParams = const VideoParams();
