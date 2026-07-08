@@ -110,72 +110,163 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
 # === Override the bundled libmpv with a build from zhongfly/mpv-winbuild ===
 # media_kit_libs_windows_video ships an older (2023-09-24) libmpv-2.dll that
 # can't demux MPEG-DASH. Rather than committing a ~120 MB DLL to the repo, we
-# fetch a *pinned* zhongfly/mpv-winbuild release at configure time (cached under
-# the build dir), verify its SHA-256, extract libmpv-2.dll, and install it
-# *after* the plugin's bundled libraries above so the install step's final
-# result is the DASH-capable DLL. media_kit loads "libmpv-2.dll" by name at
-# runtime and only uses the standard mpv_* C API, so a drop-in replacement works
-# without touching the plugin itself.
+# resolve the LATEST zhongfly/mpv-winbuild release at configure time via the
+# GitHub API, download its "mpv-dev-x86_64-*.7z" asset (SHA-256 verified using
+# the digest the API reports), extract libmpv-2.dll, and install it *after* the
+# plugin's bundled libraries above so the install step's final result is the
+# DASH-capable DLL. media_kit loads "libmpv-2.dll" by name at runtime and only
+# uses the standard mpv_* C API, so a drop-in replacement works without touching
+# the plugin itself.
 #
-# To bump the version: pick a "mpv-dev-x86_64-*.7z" asset from
-# https://github.com/zhongfly/mpv-winbuild/releases and update the three
-# variables below (name, URL and SHA-256 from that release's sha256.txt).
-set(ZHONGFLY_MPV_ARCHIVE_NAME "mpv-dev-x86_64-20260707-git-4c220ffd95.7z")
-set(ZHONGFLY_MPV_URL
-  "https://github.com/zhongfly/mpv-winbuild/releases/download/2026-07-07-4c220ffd95/${ZHONGFLY_MPV_ARCHIVE_NAME}")
-set(ZHONGFLY_MPV_SHA256 "3e6ae941378473f31c222800e05eac621c71a01cd3836e02b9ca8d8aa8ac93b6")
+# Trade-offs of tracking "latest":
+#   * Needs network + GitHub API at CMake *configure* time (i.e. on a fresh /
+#     cleaned build or whenever CMake re-runs -- not on every incremental build).
+#     Unauthenticated GitHub API allows 60 requests/hour/IP.
+#   * Builds are no longer perfectly reproducible. To pin a specific release,
+#     configure with -DLIBMPV_RELEASE_TAG=<tag> (e.g. 2026-07-07-4c220ffd95).
+#   * On any failure (offline, rate-limited, ...) we reuse a previously cached
+#     DLL, and only as a last resort fall back to media_kit's bundled build, so
+#     the build never hard-fails just because GitHub is unreachable.
 
-set(ZHONGFLY_MPV_ARCHIVE "${CMAKE_BINARY_DIR}/${ZHONGFLY_MPV_ARCHIVE_NAME}")
 set(ZHONGFLY_MPV_SRC "${CMAKE_BINARY_DIR}/zhongfly_libmpv")
 set(CUSTOM_LIBMPV "${ZHONGFLY_MPV_SRC}/libmpv-2.dll")
+set(ZHONGFLY_MPV_STAMP "${ZHONGFLY_MPV_SRC}/.resolved-asset")
 
-# Drop a stale cached archive if its hash no longer matches the pinned one.
-if(EXISTS "${ZHONGFLY_MPV_ARCHIVE}")
-  file(SHA256 "${ZHONGFLY_MPV_ARCHIVE}" ZHONGFLY_MPV_ARCHIVE_SHA256)
-  if(NOT ZHONGFLY_MPV_ARCHIVE_SHA256 STREQUAL ZHONGFLY_MPV_SHA256)
-    message(STATUS "Cached zhongfly libmpv archive is stale; removing it.")
-    file(REMOVE "${ZHONGFLY_MPV_ARCHIVE}")
+# Optional pin: -DLIBMPV_RELEASE_TAG=<tag> targets that release instead of latest.
+if(DEFINED LIBMPV_RELEASE_TAG AND NOT LIBMPV_RELEASE_TAG STREQUAL "")
+  set(ZHONGFLY_MPV_API_URL
+    "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/tags/${LIBMPV_RELEASE_TAG}")
+else()
+  set(ZHONGFLY_MPV_API_URL
+    "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest")
+endif()
+
+set(ZHONGFLY_MPV_ASSET_NAME "")
+set(ZHONGFLY_MPV_ASSET_URL "")
+set(ZHONGFLY_MPV_ASSET_SHA256 "")
+
+# --- Resolve the newest mpv-dev-x86_64 (non-v3, non-lgpl) asset via GitHub API.
+if(NOT CMAKE_VERSION VERSION_LESS "3.19")
+  set(ZHONGFLY_MPV_API_JSON "${CMAKE_BINARY_DIR}/zhongfly_release.json")
+  message(STATUS "Resolving zhongfly libmpv release from ${ZHONGFLY_MPV_API_URL} ...")
+  file(DOWNLOAD "${ZHONGFLY_MPV_API_URL}" "${ZHONGFLY_MPV_API_JSON}"
+    HTTPHEADER "Accept: application/vnd.github+json"
+    HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
+    STATUS ZHONGFLY_MPV_API_STATUS)
+  list(GET ZHONGFLY_MPV_API_STATUS 0 ZHONGFLY_MPV_API_CODE)
+  if(ZHONGFLY_MPV_API_CODE EQUAL 0)
+    file(READ "${ZHONGFLY_MPV_API_JSON}" ZHONGFLY_MPV_JSON)
+    string(JSON ZHONGFLY_MPV_ASSET_COUNT ERROR_VARIABLE ZHONGFLY_MPV_JSON_ERR
+      LENGTH "${ZHONGFLY_MPV_JSON}" assets)
+    if(ZHONGFLY_MPV_JSON_ERR STREQUAL "NOTFOUND" AND ZHONGFLY_MPV_ASSET_COUNT GREATER 0)
+      math(EXPR ZHONGFLY_MPV_LAST "${ZHONGFLY_MPV_ASSET_COUNT} - 1")
+      foreach(i RANGE ${ZHONGFLY_MPV_LAST})
+        string(JSON ZHONGFLY_MPV_NAME GET "${ZHONGFLY_MPV_JSON}" assets ${i} name)
+        # Match e.g. mpv-dev-x86_64-20260707-git-4c220ffd95.7z. Requiring a digit
+        # right after the arch excludes the "-v3-" and "-lgpl-" variants.
+        if(ZHONGFLY_MPV_NAME MATCHES "^mpv-dev-x86_64-[0-9].*\\.7z$")
+          set(ZHONGFLY_MPV_ASSET_NAME "${ZHONGFLY_MPV_NAME}")
+          string(JSON ZHONGFLY_MPV_ASSET_URL
+            GET "${ZHONGFLY_MPV_JSON}" assets ${i} browser_download_url)
+          string(JSON ZHONGFLY_MPV_DIGEST ERROR_VARIABLE ZHONGFLY_MPV_DIGEST_ERR
+            GET "${ZHONGFLY_MPV_JSON}" assets ${i} digest)
+          if(ZHONGFLY_MPV_DIGEST_ERR STREQUAL "NOTFOUND"
+              AND ZHONGFLY_MPV_DIGEST MATCHES "^sha256:")
+            string(REGEX REPLACE "^sha256:" "" ZHONGFLY_MPV_ASSET_SHA256
+              "${ZHONGFLY_MPV_DIGEST}")
+          endif()
+          break()
+        endif()
+      endforeach()
+    endif()
+    if(ZHONGFLY_MPV_ASSET_NAME STREQUAL "")
+      message(WARNING "Could not find an mpv-dev-x86_64 asset in the GitHub API response.")
+    endif()
+  else()
+    list(GET ZHONGFLY_MPV_API_STATUS 1 ZHONGFLY_MPV_API_MSG)
+    message(WARNING "Failed to query GitHub API for libmpv release "
+      "(${ZHONGFLY_MPV_API_CODE}): ${ZHONGFLY_MPV_API_MSG}")
+  endif()
+else()
+  message(WARNING "CMake ${CMAKE_VERSION} < 3.19 cannot parse JSON; "
+    "skipping automatic libmpv resolution.")
+endif()
+
+# --- Download + extract the resolved asset (skipped if already current).
+if(NOT ZHONGFLY_MPV_ASSET_NAME STREQUAL "")
+  set(ZHONGFLY_MPV_ARCHIVE "${CMAKE_BINARY_DIR}/${ZHONGFLY_MPV_ASSET_NAME}")
+
+  # Do we already have this exact asset extracted?
+  set(ZHONGFLY_MPV_CURRENT FALSE)
+  if(EXISTS "${CUSTOM_LIBMPV}" AND EXISTS "${ZHONGFLY_MPV_STAMP}")
+    file(READ "${ZHONGFLY_MPV_STAMP}" ZHONGFLY_MPV_PREV)
+    string(STRIP "${ZHONGFLY_MPV_PREV}" ZHONGFLY_MPV_PREV)
+    if(ZHONGFLY_MPV_PREV STREQUAL "${ZHONGFLY_MPV_ASSET_NAME}")
+      set(ZHONGFLY_MPV_CURRENT TRUE)
+    endif()
+  endif()
+
+  if(ZHONGFLY_MPV_CURRENT)
+    message(STATUS "zhongfly libmpv ${ZHONGFLY_MPV_ASSET_NAME} already up to date.")
+  else()
+    # New version -> drop any previous extraction.
     file(REMOVE_RECURSE "${ZHONGFLY_MPV_SRC}")
+    file(MAKE_DIRECTORY "${ZHONGFLY_MPV_SRC}")
+
+    # (Re)download unless a cached archive already matches the expected hash.
+    set(ZHONGFLY_MPV_NEED_DL TRUE)
+    if(EXISTS "${ZHONGFLY_MPV_ARCHIVE}" AND NOT ZHONGFLY_MPV_ASSET_SHA256 STREQUAL "")
+      file(SHA256 "${ZHONGFLY_MPV_ARCHIVE}" ZHONGFLY_MPV_HAVE_SHA)
+      if(ZHONGFLY_MPV_HAVE_SHA STREQUAL "${ZHONGFLY_MPV_ASSET_SHA256}")
+        set(ZHONGFLY_MPV_NEED_DL FALSE)
+      endif()
+    endif()
+
+    if(ZHONGFLY_MPV_NEED_DL)
+      message(STATUS "Downloading ${ZHONGFLY_MPV_ASSET_NAME} ...")
+      if(NOT ZHONGFLY_MPV_ASSET_SHA256 STREQUAL "")
+        file(DOWNLOAD "${ZHONGFLY_MPV_ASSET_URL}" "${ZHONGFLY_MPV_ARCHIVE}"
+          EXPECTED_HASH SHA256=${ZHONGFLY_MPV_ASSET_SHA256}
+          SHOW_PROGRESS STATUS ZHONGFLY_MPV_DL_STATUS)
+      else()
+        message(WARNING "GitHub API provided no SHA-256 digest; "
+          "downloading ${ZHONGFLY_MPV_ASSET_NAME} without hash verification.")
+        file(DOWNLOAD "${ZHONGFLY_MPV_ASSET_URL}" "${ZHONGFLY_MPV_ARCHIVE}"
+          SHOW_PROGRESS STATUS ZHONGFLY_MPV_DL_STATUS)
+      endif()
+      list(GET ZHONGFLY_MPV_DL_STATUS 0 ZHONGFLY_MPV_DL_CODE)
+      if(NOT ZHONGFLY_MPV_DL_CODE EQUAL 0)
+        list(GET ZHONGFLY_MPV_DL_STATUS 1 ZHONGFLY_MPV_DL_MSG)
+        file(REMOVE "${ZHONGFLY_MPV_ARCHIVE}")
+        message(WARNING "Failed to download ${ZHONGFLY_MPV_ASSET_NAME} "
+          "(${ZHONGFLY_MPV_DL_CODE}): ${ZHONGFLY_MPV_DL_MSG}")
+      endif()
+    endif()
+
+    # Extract libmpv-2.dll (CMake's bundled libarchive reads .7z). The DLL lives
+    # at the archive root; extra headers/import lib are harmless and ignored.
+    if(EXISTS "${ZHONGFLY_MPV_ARCHIVE}")
+      message(STATUS "Extracting ${ZHONGFLY_MPV_ASSET_NAME} ...")
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${ZHONGFLY_MPV_ARCHIVE}"
+        WORKING_DIRECTORY "${ZHONGFLY_MPV_SRC}"
+        RESULT_VARIABLE ZHONGFLY_MPV_EXTRACT_RESULT)
+      if(ZHONGFLY_MPV_EXTRACT_RESULT EQUAL 0 AND EXISTS "${CUSTOM_LIBMPV}")
+        file(WRITE "${ZHONGFLY_MPV_STAMP}" "${ZHONGFLY_MPV_ASSET_NAME}")
+      else()
+        message(WARNING "Failed to extract libmpv-2.dll from ${ZHONGFLY_MPV_ASSET_NAME}.")
+      endif()
+    endif()
   endif()
 endif()
 
-# Download the pinned archive if it isn't already cached.
-if(NOT EXISTS "${ZHONGFLY_MPV_ARCHIVE}")
-  message(STATUS "Downloading zhongfly libmpv from ${ZHONGFLY_MPV_URL} ...")
-  file(DOWNLOAD "${ZHONGFLY_MPV_URL}" "${ZHONGFLY_MPV_ARCHIVE}"
-    EXPECTED_HASH SHA256=${ZHONGFLY_MPV_SHA256}
-    SHOW_PROGRESS
-    STATUS ZHONGFLY_MPV_DL_STATUS)
-  list(GET ZHONGFLY_MPV_DL_STATUS 0 ZHONGFLY_MPV_DL_CODE)
-  if(NOT ZHONGFLY_MPV_DL_CODE EQUAL 0)
-    list(GET ZHONGFLY_MPV_DL_STATUS 1 ZHONGFLY_MPV_DL_MSG)
-    file(REMOVE "${ZHONGFLY_MPV_ARCHIVE}")
-    message(FATAL_ERROR "Failed to download zhongfly libmpv "
-      "(${ZHONGFLY_MPV_DL_CODE}): ${ZHONGFLY_MPV_DL_MSG}")
-  endif()
-endif()
-
-# Extract libmpv-2.dll (CMake's bundled libarchive reads .7z). The DLL lives at
-# the archive root, so a full extract is fine; the extra headers/import lib are
-# harmless and simply ignored.
-if(NOT EXISTS "${CUSTOM_LIBMPV}")
-  file(MAKE_DIRECTORY "${ZHONGFLY_MPV_SRC}")
-  message(STATUS "Extracting ${ZHONGFLY_MPV_ARCHIVE_NAME} ...")
-  execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E tar xf "${ZHONGFLY_MPV_ARCHIVE}"
-    WORKING_DIRECTORY "${ZHONGFLY_MPV_SRC}"
-    RESULT_VARIABLE ZHONGFLY_MPV_EXTRACT_RESULT)
-  if(NOT ZHONGFLY_MPV_EXTRACT_RESULT EQUAL 0)
-    message(FATAL_ERROR "Failed to extract ${ZHONGFLY_MPV_ARCHIVE_NAME}.")
-  endif()
-endif()
-
+# --- Install the resolved DLL over media_kit's, or fall back with a warning.
 if(EXISTS "${CUSTOM_LIBMPV}")
   message(STATUS "Overriding bundled libmpv-2.dll with ${CUSTOM_LIBMPV}")
   install(FILES "${CUSTOM_LIBMPV}"
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 else()
-  message(WARNING "zhongfly libmpv-2.dll not found after extraction; "
+  message(WARNING "No zhongfly libmpv-2.dll available; "
     "using media_kit's bundled (non-DASH) build.")
 endif()
