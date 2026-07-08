@@ -479,14 +479,11 @@ class _IptvHomeState extends State<IptvHome> {
         return;
       }
       reconnecting = true;
-      // mpv runs with keep-open=yes, so the last frame is still held on the
-      // output here. Grab it once and freeze it so the reload doesn't flash
-      // black. Captured on-demand (not periodically) to avoid playback stutter.
-      await _captureLastFrame();
-      if (!mounted) return;
-      // Ensure the freeze-frame overlay is applied even if capture returned
-      // nothing (reconnecting was set outside of setState above).
-      setState(() {});
+      // Fast segment-boundary reconnect: do NOT take a screenshot or rebuild
+      // the Flutter overlay here. Screenshot capture is expensive and was part
+      // of the visible pause at every boundary. mpv is kept open and `loadfile
+      // replace` preserves the video output texture, so the last decoded frame
+      // remains on screen while we immediately open the next segment/session.
       _scheduleReconnect();
     });
     // A successful resume means the previous segment boundary was crossed, so
@@ -536,20 +533,6 @@ class _IptvHomeState extends State<IptvHome> {
     logSubscription = player.stream.log.listen((log) {
       debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
     });
-  }
-
-  // Capture the currently displayed frame. mpv holds the last frame at EOF
-  // (keep-open=yes), so calling this at the "completed" event yields a real
-  // image to freeze during the reconnect instead of a black screen.
-  Future<void> _captureLastFrame() async {
-    try {
-      final frame = await player.screenshot();
-      if (!mounted || frame == null) return;
-      // Release the previous freeze frame before storing the new one so its
-      // decoded bitmap doesn't linger in the global image cache.
-      _clearFreezeFrame();
-      lastFrame = frame;
-    } catch (_) {}
   }
 
   // Drop the current freeze frame and evict its decoded bitmap from the global
@@ -1102,10 +1085,10 @@ class _IptvHomeState extends State<IptvHome> {
     }
     reconnectAttempts++;
     final request = playbackRequest;
-    // Reconnect quickly on the first try (segment gap), then back off if the
-    // stream is genuinely struggling, capped at 5s.
+    // Reconnect immediately on the first try (normal segment boundary), then
+    // back off only if the stream is genuinely struggling, capped at 5s.
     final delay = reconnectAttempts <= 1
-        ? const Duration(milliseconds: 200)
+        ? Duration.zero
         : Duration(seconds: reconnectAttempts.clamp(1, 5));
     reconnectTimer?.cancel();
     reconnectTimer = Timer(delay, () {
@@ -1129,10 +1112,18 @@ class _IptvHomeState extends State<IptvHome> {
       'Reconnecting stream (attempt $reconnectAttempts): $reloadUrl',
     );
     try {
-      await _applyPlaybackOptions();
-      if (!mounted || request != playbackRequest) return;
-      // Keep reconnecting=true (freeze frame + spinner stay up) until the
-      // playing event confirms the new segment is rendering.
+      // The first reconnect is the hot segment-boundary path. Playback options
+      // were already applied before the current source opened, and reapplying
+      // them here costs extra async round-trips right when the player is empty.
+      // If the first reload fails and we enter backoff retries, reapply options
+      // as a conservative recovery step.
+      if (reconnectAttempts > 1) {
+        await _applyPlaybackOptions();
+        if (!mounted || request != playbackRequest) return;
+      }
+      // Keep reconnecting=true until decoded frames/position confirm the new
+      // segment is rendering; the UI is not rebuilt just for segment-boundary
+      // reconnects, so this flag mainly suppresses duplicate reconnects.
       //
       // Prefer mpv's `loadfile <url> replace`: it swaps the source while
       // keeping the existing video output texture, so the last decoded frame
@@ -1346,6 +1337,13 @@ class _IptvHomeState extends State<IptvHome> {
       'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
+      // Keep the last decoded frame on EOF so a fast `loadfile replace` at a
+      // segment boundary does not flash black while the next connection opens.
+      'keep-open': 'yes',
+      // Let mpv actually use more of media_kit's 32 MiB forward buffer. This
+      // does not stitch independent segments together (so no rewind risk), but
+      // it smooths ordinary intra-segment network jitter.
+      'demuxer-readahead-secs': '8',
       // media_kit sizes mpv's backward demuxer cache from `bufferSize` too, so
       // it grows toward tens of MiB the entire time a stream plays. Live IPTV
       // can never seek backward, so that buffer is pure wasted RAM that makes
