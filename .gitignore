@@ -19,8 +19,10 @@ Thumbs.db
 *.m3u
 *.m3u8
 
-# Custom DASH-capable libmpv build (too large for git; placed manually and
-# copied over media_kit's bundled DLL by windows/CMakeLists.txt at build time)
+# DASH-capable libmpv build. Fetched automatically from a pinned
+# zhongfly/mpv-winbuild release by windows/CMakeLists.txt at configure time
+# (cached under build/), then installed over media_kit's bundled DLL. Kept out
+# of git regardless of where a copy might end up.
 libmpv-2.dll
 
 # Reference sources kept locally for study, not part of this project
