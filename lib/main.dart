@@ -251,19 +251,6 @@ class _IptvHomeState extends State<IptvHome> {
   StreamSubscription<Duration>? durationSubscription;
   StreamSubscription<String>? errorSubscription;
   StreamSubscription<PlayerLog>? logSubscription;
-  StreamSubscription<Playlist>? playlistSubscription;
-
-  // Playlist-prefetch state. Plain (non-DASH) streams are opened as a small
-  // self-extending playlist of the same URL with mpv's `prefetch-playlist`
-  // enabled: when a segment ends mpv has already opened the next entry, so it
-  // switches over with no reload hitch — and, because each entry is its own
-  // fresh timeline, without the timestamp-discontinuity rewind that continuous
-  // byte-splicing caused. We keep exactly one entry queued ahead by appending a
-  // new one each time mpv advances.
-  bool _playlistPrefetch = false;
-  int _lastPlaylistIndex = 0;
-  int _playlistLength = 0;
-  DateTime _lastPrefetchAppend = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? bitrateTimer;
   Timer? reconnectTimer;
   // Retained only so existing cancel() calls stay valid; the initial-connection
@@ -415,7 +402,6 @@ class _IptvHomeState extends State<IptvHome> {
     durationSubscription?.cancel();
     errorSubscription?.cancel();
     logSubscription?.cancel();
-    playlistSubscription?.cancel();
     bitrateTimer?.cancel();
     reconnectTimer?.cancel();
     connectTimer?.cancel();
@@ -485,13 +471,6 @@ class _IptvHomeState extends State<IptvHome> {
       // Ignore the completed event that our own player.stop() triggers once a
       // failure has already been recorded.
       if (_failureLabel != null) return;
-      // In playlist-prefetch mode, a `completed` while entries are still queued
-      // ahead is a per-entry (segment-boundary) event — mpv advances to the
-      // prefetched next entry on its own, so don't tear the stream down. Only a
-      // completed with no entries left ahead is a genuine end worth reloading.
-      if (_playlistPrefetch && _lastPlaylistIndex < _playlistLength - 1) {
-        return;
-      }
       // Never rendered a frame: this "completed" is a failed/aborted open, not
       // a segment boundary. Treat it as a load failure immediately.
       if (!_everPlayed) {
@@ -556,28 +535,6 @@ class _IptvHomeState extends State<IptvHome> {
     // stream failed.
     logSubscription = player.stream.log.listen((log) {
       debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
-    });
-    // Keep the prefetch playlist topped up. Each time mpv advances to the next
-    // (already-prefetched) entry, append one more so there's always a segment
-    // queued ahead. Rate-limited so a dead stream that EOFs instantly can't
-    // spin into a tight append/reload loop — if that happens the queue drains
-    // and the completed handler takes over as a fallback.
-    playlistSubscription = player.stream.playlist.listen((pl) {
-      _playlistLength = pl.medias.length;
-      if (!_playlistPrefetch || !mounted || nowPlaying == null) return;
-      if (pl.index <= _lastPlaylistIndex) return;
-      _lastPlaylistIndex = pl.index;
-      final now = DateTime.now();
-      if (now.difference(_lastPrefetchAppend) <
-          const Duration(milliseconds: 500)) {
-        return;
-      }
-      _lastPrefetchAppend = now;
-      final url = _activeStreamUrl;
-      if (url.isEmpty) return;
-      player.add(Media(url)).catchError((Object e) {
-        debugPrint('prefetch append failed: $e');
-      });
     });
   }
 
@@ -976,26 +933,18 @@ class _IptvHomeState extends State<IptvHome> {
     if (cursorHidden) setState(() => cursorHidden = false);
   }
 
-  // Probes an HTTP(S) stream by fetching a small prefix with a short timeout.
-  // Returns:
-  //   * nativeSafe: false only when the stream is a format the bundled libmpv
-  //     can't open without crashing the whole process (currently MPEG-DASH).
-  //     Defaults to true on any uncertainty so a flaky probe never blocks a
-  //     good channel.
-  //   * isHls: true when the stream is an HLS playlist. HLS describes its own
-  //     segments and must be driven by mpv's demuxer, so it must NOT be routed
-  //     through the continuous byte relay.
-  //   * isHttp: whether the URL is an http(s) endpoint at all.
-  Future<({bool nativeSafe, bool isHls, bool isHttp})> _probeStream(
-    String url,
-  ) async {
+  // Returns false when the stream is a format the bundled libmpv can't open
+  // without crashing the whole process (currently MPEG-DASH). Fetches a small
+  // prefix with a short timeout so a healthy stream isn't delayed much, and
+  // returns true (play it) on any uncertainty so a flaky probe never blocks a
+  // good channel.
+  Future<bool> _isNativeSafeStream(String url) async {
     final uri = Uri.tryParse(url);
-    // Only HTTP(S) endpoints can serve a manifest; let mpv handle everything
-    // else (file, udp, rtp, ...) directly and never relay it.
+    // Only HTTP(S) endpoints can serve a DASH manifest; let mpv handle
+    // everything else (file, udp, rtp, ...) directly.
     if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
-      return (nativeSafe: true, isHls: false, isHttp: false);
+      return true;
     }
-    final pathLower = uri.path.toLowerCase();
     final client = http.Client();
     try {
       final request = http.Request('GET', uri)
@@ -1022,18 +971,7 @@ class _IptvHomeState extends State<IptvHome> {
           contentType.contains('dash+xml') ||
           head.contains('<MPD') ||
           head.contains('urn:mpeg:dash');
-      final looksHls =
-          contentType.contains('mpegurl') ||
-          head.trimLeft().startsWith('#EXTM3U') ||
-          pathLower.endsWith('.m3u8') ||
-          pathLower.endsWith('.m3u');
-      return (nativeSafe: !looksDash, isHls: looksHls, isHttp: true);
-    } catch (_) {
-      // On any probe failure, fall back to "safe, unknown": play it, but treat
-      // as HLS so we don't wrap an unprobed stream in the relay.
-      final urlLooksHls =
-          pathLower.endsWith('.m3u8') || pathLower.endsWith('.m3u');
-      return (nativeSafe: true, isHls: urlLooksHls, isHttp: true);
+      return !looksDash;
     } finally {
       client.close();
     }
@@ -1098,7 +1036,7 @@ class _IptvHomeState extends State<IptvHome> {
     var nativeSafe = true;
     if (!channel.isDash) {
       try {
-        nativeSafe = (await _probeStream(channel.url)).nativeSafe;
+        nativeSafe = await _isNativeSafeStream(channel.url);
       } catch (_) {}
     }
     if (!mounted || request != playbackRequest) return;
@@ -1113,21 +1051,7 @@ class _IptvHomeState extends State<IptvHome> {
     _activeStreamUrl = streamUrl;
     await _applyPlaybackOptions();
     if (!mounted || request != playbackRequest) return;
-
-    // Plain streams are opened as a self-extending playlist so mpv can prefetch
-    // the next segment and cross segment boundaries seamlessly (see the
-    // playlist subscription in _listenPlaybackInfo). DASH — the origin's own
-    // manifest or our ClearKey proxy manifest — is one continuous adaptive
-    // stream that never EOFs per segment, so it stays a single Media.
-    _lastPlaylistIndex = 0;
-    _playlistLength = 0;
-    _lastPrefetchAppend = DateTime.fromMillisecondsSinceEpoch(0);
-    _playlistPrefetch = !channel.isDash && !channel.isEncryptedDash;
-    if (_playlistPrefetch) {
-      await player.open(Playlist([Media(streamUrl), Media(streamUrl)]));
-    } else {
-      await player.open(Media(streamUrl));
-    }
+    await player.open(Media(streamUrl));
     // No connection watchdog: slow-starting streams (e.g. DASH going through
     // the local decrypting proxy, or channels behind slow CDNs) can take a
     // while to render the first frame, and we don't want to kill them early.
@@ -1251,7 +1175,6 @@ class _IptvHomeState extends State<IptvHome> {
     _everPlayed = false;
     _failureLabel = null;
     _activeStreamUrl = '';
-    _playlistPrefetch = false;
     _clearFreezeFrame();
     unawaited(_clearKeyProxy.stop());
     streamUrlController.clear();
@@ -1428,33 +1351,6 @@ class _IptvHomeState extends State<IptvHome> {
       // can never seek backward, so that buffer is pure wasted RAM that makes
       // memory climb steadily during playback. Cap it hard.
       'demuxer-max-back-bytes': (4 * 1024 * 1024).toString(),
-      // Prefetch several segments ahead instead of mpv's tiny ~1s default. The
-      // 32 MiB forward cache (bufferSize) is otherwise never filled: mpv stops
-      // reading once `demuxer-readahead-secs` worth of packets are queued, so a
-      // 1s window drains the moment the network hiccups and playback stutters.
-      // A ~20s window keeps multiple segments buffered so segment-boundary
-      // fetches are absorbed by the cache rather than seen as a stall. Costs a
-      // few extra seconds of startup/live latency, acceptable for IPTV.
-      'demuxer-readahead-secs': '20',
-      'cache': 'yes',
-      'cache-secs': '30',
-      // Don't start playing until enough is buffered, and when the cache does
-      // run dry wait until it refills a little before resuming — avoids the
-      // rapid pause/play micro-stutter on marginal connections.
-      'cache-pause-initial': 'yes',
-      'cache-pause-wait': '2',
-      // Open the next playlist entry before the current one ends. For plain
-      // streams we hand mpv a self-extending playlist of the same URL (see
-      // _play), so this prefetches the next segment and lets mpv switch across
-      // the boundary with no reload gap. No-op for single-Media (DASH) opens.
-      'prefetch-playlist': 'yes',
-      // NOTE: deliberately NOT enabling FFmpeg's `reconnect_at_eof`. Streams
-      // whose origin closes per segment resend a few seconds of back-buffer on
-      // each new connection; continuing the same timeline across that (via
-      // ffmpeg reconnect, or a byte relay) replays old frames as a visible
-      // rewind. The app's `completed` -> reload path resets the timeline
-      // instead, so playback moves forward cleanly (at the cost of a brief
-      // hitch). Larger read-ahead above is what smooths ordinary buffering.
       // ClearKey DRM: hand the content key to FFmpeg's demuxer so it can
       // decrypt CENC (AES-128-CTR) fragments inline. Set to empty for
       // unprotected streams so a key from a previous channel never lingers.
