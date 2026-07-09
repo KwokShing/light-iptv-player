@@ -29,8 +29,9 @@ const fullscreenAnimationDuration = Duration(milliseconds: 180);
 const fullscreenAnimationCurve = Curves.easeOutCubic;
 // Fixed height of a channel row, including its bottom divider. Sized to fit the
 // 46px logo (plus padding) and, while searching, a single-line name above the
-// group label without overflow.
-const _channelRowHeight = 64.0;
+// group label without overflow, with a little slack for larger system text
+// scaling.
+const _channelRowHeight = 70.0;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -268,6 +269,18 @@ class _IptvHomeState extends State<IptvHome> {
   // control bar. 'Load error' for a hard open/demux failure. Cleared on a new
   // open, on stop, and if playback eventually starts.
   String? _failureLabel;
+  // Timestamp of the most recent "[mpv:error] ytdl_hook: ..." log line. mpv's
+  // youtube-dl hook failing (e.g. "youtube-dl failed: not found or not enough
+  // permissions") does NOT mean the stream is dead — mpv falls back to opening
+  // the URL directly, which usually succeeds a moment later. Reset on each open.
+  DateTime? _lastYtdlHookErrorAt;
+  // Armed the first time a pre-first-frame failure is deferred because it looks
+  // like a ytdl_hook-only problem. While it's pending we keep quietly retrying
+  // instead of showing "Load error"; if it fires without playback ever starting
+  // the stream is finally declared failed.
+  Timer? _ytdlGraceTimer;
+  // How long to keep retrying a ytdl_hook-only failure before giving up.
+  static const _ytdlGracePeriod = Duration(seconds: 20);
   Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
@@ -405,6 +418,7 @@ class _IptvHomeState extends State<IptvHome> {
     bitrateTimer?.cancel();
     reconnectTimer?.cancel();
     connectTimer?.cancel();
+    _ytdlGraceTimer?.cancel();
     cursorHideTimer?.cancel();
     playerFocusNode.dispose();
     streamUrlController.dispose();
@@ -474,6 +488,16 @@ class _IptvHomeState extends State<IptvHome> {
       // Never rendered a frame: this "completed" is a failed/aborted open, not
       // a segment boundary. Treat it as a load failure immediately.
       if (!_everPlayed) {
+        // If youtube-dl just failed, mpv may still play the URL directly. Keep
+        // retrying quietly during the grace period instead of failing now.
+        if (_deferFailureForYtdl()) {
+          debugPrint(
+            'completed before first frame but ytdl_hook-only -> retrying',
+          );
+          reconnecting = true;
+          _scheduleReconnect();
+          return;
+        }
         debugPrint('completed before first frame -> Load error');
         _failLoad();
         return;
@@ -522,6 +546,13 @@ class _IptvHomeState extends State<IptvHome> {
     errorSubscription = player.stream.error.listen((error) {
       debugPrint('Player error: $error');
       if (!mounted || nowPlaying == null || _everPlayed || reconnecting) return;
+      // A ytdl_hook failure can surface an intermediate open error while mpv is
+      // still falling back to direct playback. Hold off on failing and let the
+      // grace period / reconnect path resolve it.
+      if (_deferFailureForYtdl()) {
+        debugPrint('player error before first frame but ytdl_hook-only -> defer');
+        return;
+      }
       debugPrint('player error before first frame -> Load error');
       _failLoad();
     });
@@ -532,6 +563,12 @@ class _IptvHomeState extends State<IptvHome> {
     // stream failed.
     logSubscription = player.stream.log.listen((log) {
       debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
+      // Remember when youtube-dl/yt-dlp resolution failed so a pre-first-frame
+      // open failure can be recognised as (likely) just the ytdl hook being
+      // unavailable rather than a genuinely broken stream.
+      if (log.level == 'error' && log.prefix == 'ytdl_hook') {
+        _lastYtdlHookErrorAt = DateTime.now();
+      }
     });
   }
 
@@ -968,6 +1005,9 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectAttempts = 0;
     _everPlayed = false;
     _failureLabel = null;
+    _lastYtdlHookErrorAt = null;
+    _ytdlGraceTimer?.cancel();
+    _ytdlGraceTimer = null;
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
@@ -1047,11 +1087,35 @@ class _IptvHomeState extends State<IptvHome> {
   // position). Clears any failure state, and — if this confirmation is a
   // reconnect resuming — drops the freeze frame.
   // Cheap and idempotent, so it's safe to call from high-frequency streams.
+  // Decides whether a pre-first-frame failure should be swallowed because it
+  // looks like it was caused only by mpv's ytdl_hook (youtube-dl) failing. When
+  // it returns true the caller must NOT show "Load error"; the grace timer armed
+  // here will finally fail the stream if playback never starts. Returns false
+  // once playback has started or a failure was already recorded.
+  bool _deferFailureForYtdl() {
+    if (_everPlayed || _failureLabel != null || nowPlaying == null) return false;
+    final at = _lastYtdlHookErrorAt;
+    // Only defer when a ytdl_hook error was seen for the current open and it's
+    // recent, so a stale error can't keep an unrelated failure alive.
+    if (at == null || DateTime.now().difference(at) > _ytdlGracePeriod) {
+      return false;
+    }
+    _ytdlGraceTimer ??= Timer(_ytdlGracePeriod, () {
+      _ytdlGraceTimer = null;
+      if (!mounted || _everPlayed || _failureLabel != null) return;
+      debugPrint('ytdl_hook grace period elapsed -> Load error');
+      _failLoad();
+    });
+    return true;
+  }
+
   void _confirmPlaybackStarted() {
     _everPlayed = true;
     reconnectAttempts = 0;
     connectTimer?.cancel();
     connectTimer = null;
+    _ytdlGraceTimer?.cancel();
+    _ytdlGraceTimer = null;
     final needsRebuild = _failureLabel != null || reconnecting;
     _failureLabel = null;
     if (reconnecting) {
@@ -1071,6 +1135,8 @@ class _IptvHomeState extends State<IptvHome> {
     }
     connectTimer?.cancel();
     connectTimer = null;
+    _ytdlGraceTimer?.cancel();
+    _ytdlGraceTimer = null;
     setState(() => _failureLabel = 'Load error');
     unawaited(player.stop().catchError((_) {}));
   }
@@ -1165,6 +1231,9 @@ class _IptvHomeState extends State<IptvHome> {
     reconnectAttempts = 0;
     _everPlayed = false;
     _failureLabel = null;
+    _lastYtdlHookErrorAt = null;
+    _ytdlGraceTimer?.cancel();
+    _ytdlGraceTimer = null;
     _activeStreamUrl = '';
     _clearFreezeFrame();
     unawaited(_clearKeyProxy.stop());
@@ -2986,7 +3055,7 @@ class _Tag extends StatelessWidget {
   }
 }
 
-class _Sidebar extends StatelessWidget {
+class _Sidebar extends StatefulWidget {
   const _Sidebar({
     required this.source,
     required this.groups,
@@ -3004,6 +3073,31 @@ class _Sidebar extends StatelessWidget {
   final ValueChanged<String> onGroup;
 
   @override
+  State<_Sidebar> createState() => _SidebarState();
+}
+
+class _SidebarState extends State<_Sidebar> {
+  final TextEditingController _searchController = TextEditingController();
+
+  @override
+  void didUpdateWidget(_Sidebar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.id != widget.source.id &&
+        _searchController.text.isNotEmpty) {
+      _searchController.clear();
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onSearch('');
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Container(
       color: const Color(0xffeef1f6),
@@ -3014,7 +3108,7 @@ class _Sidebar extends StatelessWidget {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton(
-              onPressed: onBack,
+              onPressed: widget.onBack,
               child: const Align(
                 alignment: Alignment.centerLeft,
                 child: Text('← Sources'),
@@ -3023,34 +3117,49 @@ class _Sidebar extends StatelessWidget {
           ),
           const SizedBox(height: 20),
           TextField(
-            onChanged: onSearch,
-            decoration: const InputDecoration(
+            controller: _searchController,
+            onChanged: (value) {
+              widget.onSearch(value);
+              setState(() {});
+            },
+            decoration: InputDecoration(
               filled: true,
               fillColor: Colors.white,
               hintText: 'Search channels',
-              border: OutlineInputBorder(),
+              border: const OutlineInputBorder(),
+              suffixIcon: _searchController.text.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      tooltip: 'Clear search',
+                      onPressed: () {
+                        _searchController.clear();
+                        widget.onSearch('');
+                        setState(() {});
+                      },
+                    ),
             ),
           ),
           const SizedBox(height: 18),
           const Divider(),
           Text(
-            source.name,
+            widget.source.name,
             style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
           ),
           Text(
-            '${groups.length - 1} groups',
+            '${widget.groups.length - 1} groups',
             style: const TextStyle(color: Color(0xff7d8490)),
           ),
           const SizedBox(height: 18),
           Expanded(
             child: ListView(
-              children: groups.entries.map((entry) {
-                final selected = entry.key == activeGroup;
+              children: widget.groups.entries.map((entry) {
+                final selected = entry.key == widget.activeGroup;
                 return _GroupTile(
                   label: entry.key,
                   count: entry.value,
                   selected: selected,
-                  onTap: () => onGroup(entry.key),
+                  onTap: () => widget.onGroup(entry.key),
                 );
               }).toList(),
             ),
@@ -3280,7 +3389,7 @@ class _ChannelTile extends StatelessWidget {
               bottom: BorderSide(color: Color(0x1f000000), width: 1),
             ),
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(
             children: [
               _ChannelLogo(url: channel.logo, load: loadLogo),
