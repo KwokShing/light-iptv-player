@@ -243,8 +243,6 @@ Write-Host 'Upgrading Light IPTV Player...'
 try { Wait-Process -Id \$ownerPid -Timeout 15 -ErrorAction SilentlyContinue } catch {}
 try { Stop-Process -Id \$ownerPid -Force -ErrorAction SilentlyContinue } catch {}
 
-for (\$i = 3; \$i -gt 0; \$i--) { Write-Host \$i; Start-Sleep -Seconds 1 }
-
 Write-Host 'Extracting the update package...'
 \$staging = Join-Path \$env:TEMP ('litv_stage_' + [guid]::NewGuid().ToString('N'))
 Expand-Archive -LiteralPath \$zip -DestinationPath \$staging -Force
