@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -27,7 +25,6 @@ class SourcesPage extends StatelessWidget {
         dialogTitle: 'Load M3U File',
         type: FileType.custom,
         allowedExtensions: const ['m3u', 'm3u8', 'txt'],
-        withData: true,
         lockParentWindow: true,
       );
       final files = result?.files;
@@ -37,13 +34,7 @@ class SourcesPage extends StatelessWidget {
       }
       final file = files.first;
 
-      final bytes =
-          file.bytes ??
-          (file.path == null ? null : await File(file.path!).readAsBytes());
-      if (bytes == null) {
-        if (context.mounted) _showMessage(context, 'Could not read selected file');
-        return;
-      }
+      final bytes = await file.readAsBytes();
       final text = await decodePlaylistBytes(bytes);
       final channels = parsePlaylist(text);
       if (channels.isEmpty) {

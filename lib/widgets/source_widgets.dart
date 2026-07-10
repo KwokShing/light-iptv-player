@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -124,17 +122,13 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
         dialogTitle: 'Load M3U File',
         type: FileType.custom,
         allowedExtensions: const ['m3u', 'm3u8', 'txt'],
-        withData: true,
         lockParentWindow: true,
       );
       final files = result?.files;
       if (files == null || files.isEmpty) return;
       final file = files.first;
 
-      final bytes =
-          file.bytes ??
-          (file.path == null ? null : await File(file.path!).readAsBytes());
-      if (bytes == null) return;
+      final bytes = await file.readAsBytes();
       final text = await decodePlaylistBytes(bytes);
       final channels = parsePlaylist(text);
       if (channels.isEmpty) return;
