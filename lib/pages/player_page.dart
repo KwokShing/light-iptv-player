@@ -72,26 +72,25 @@ class _PlayerPageState extends State<PlayerPage> {
                 // Top bar collapses to zero height in fullscreen.
                 if (!fullscreen)
                   TopBar(
-                    title: source.name,
-                    subtitle: '${groups.length - 1} groups',
+                    title: '',
+                    showLogo: false,
+                    searchLeftInset: sideColumnsWidth,
+                    leading: TopBarIconButton(
+                      icon: Icons.home_rounded,
+                      tooltip: 'Back to sources',
+                      onPressed: () => _showSourcesPage(context),
+                    ),
                     search: TopBarSearch(
                       controller: _searchController,
                       onChanged: ui.setSearch,
                       hint: 'Search channels',
                     ),
-                    trailing: [
-                      TopBarButton(
-                        icon: Icons.arrow_back_rounded,
-                        label: 'Sources',
-                        onPressed: () => _showSourcesPage(context),
-                      ),
-                    ],
                   ),
                 Expanded(
                   child: Row(
                     children: [
                       SizedBox(
-                        width: fullscreen ? 0 : 190,
+                        width: fullscreen ? 0 : sidebarWidth,
                         child: ClipRect(
                           child: IgnorePointer(
                             ignoring: fullscreen,
@@ -107,7 +106,7 @@ class _PlayerPageState extends State<PlayerPage> {
                         ),
                       ),
                       SizedBox(
-                        width: fullscreen ? 0 : 250,
+                        width: fullscreen ? 0 : channelListWidth,
                         child: ClipRect(
                           child: IgnorePointer(
                             ignoring: fullscreen,

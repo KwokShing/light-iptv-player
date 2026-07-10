@@ -16,3 +16,14 @@ const fullscreenAnimationCurve = Curves.easeOutCubic;
 // group label without overflow, with a little slack for larger system text
 // scaling.
 const channelRowHeight = 70.0;
+
+// Widths of the two left columns on the player page. The video pane starts at
+// their sum, so the top bar aligns its search field to that edge.
+const sidebarWidth = 190.0;
+const channelListWidth = 250.0;
+const sideColumnsWidth = sidebarWidth + channelListWidth;
+
+// Horizontal padding inside the top bar. Matches the sidebar's left padding so
+// the top bar's leading control (home button) lines up with the sidebar's left
+// content edge.
+const topBarHorizontalPadding = 14.0;

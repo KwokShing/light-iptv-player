@@ -217,6 +217,7 @@ class SourcesPage extends StatelessWidget {
           TopBar(
             title: 'Light IPTV Player',
             subtitle: '${sources.sources.length} sources',
+            showLogo: false,
             trailing: [
               _AddSourceButton(
                 onLocal: () => _addLocalSource(context),

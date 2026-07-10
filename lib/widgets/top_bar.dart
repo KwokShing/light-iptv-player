@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../constants.dart';
 import '../theme.dart';
 import 'common.dart';
 
@@ -13,6 +14,10 @@ class TopBar extends StatelessWidget {
     this.subtitle,
     this.search,
     this.trailing = const [],
+    this.onLogoTap,
+    this.leading,
+    this.searchLeftInset,
+    this.showLogo = true,
   });
 
   final String title;
@@ -24,21 +29,123 @@ class TopBar extends StatelessWidget {
   /// Widgets rendered on the right edge of the bar.
   final List<Widget> trailing;
 
+  /// When provided, tapping the brand (logo + title) invokes this — e.g. to
+  /// return to the sources/home page from the player.
+  final VoidCallback? onLogoTap;
+
+  /// Optional widget shown immediately to the right of the brand (before the
+  /// search field), e.g. a home/back icon button.
+  final Widget? leading;
+
+  /// When set, the search field is left-aligned so its left edge sits this
+  /// many pixels from the bar's left content edge (used to line the search box
+  /// up with the video pane on the player page). When null, search is centered.
+  final double? searchLeftInset;
+
+  /// Whether to show the IPTV logo tile in the brand block.
+  final bool showLogo;
+
   @override
   Widget build(BuildContext context) {
+    final brand = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _Brand(
+          title: title,
+          subtitle: subtitle,
+          onTap: onLogoTap,
+          showLogo: showLogo,
+        ),
+        if (leading != null) ...[const SizedBox(width: 12), leading!],
+      ],
+    );
+
+    final Widget content;
+    if (search != null && searchLeftInset != null) {
+      // Left-align the search field to a fixed inset so it lines up with the
+      // video pane. Brand sits on the left, trailing on the right; both float
+      // above so a wide search box can't push them around.
+      content = Stack(
+        children: [
+          Align(alignment: Alignment.centerLeft, child: brand),
+          Positioned(
+            left: searchLeftInset! - topBarHorizontalPadding,
+            top: 0,
+            bottom: 0,
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 460),
+                child: _SearchField(search: search!),
+              ),
+            ),
+          ),
+          if (trailing.isNotEmpty)
+            Align(
+              alignment: Alignment.centerRight,
+              child: Row(mainAxisSize: MainAxisSize.min, children: trailing),
+            ),
+        ],
+      );
+    } else {
+      content = Row(
+        children: [
+          brand,
+          const SizedBox(width: 24),
+          if (search != null)
+            Expanded(
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 460),
+                  child: _SearchField(search: search!),
+                ),
+              ),
+            )
+          else
+            const Spacer(),
+          const SizedBox(width: 12),
+          ...trailing,
+        ],
+      );
+    }
+
     return Container(
       height: 64,
-      padding: const EdgeInsets.symmetric(horizontal: 18),
+      padding: const EdgeInsets.symmetric(horizontal: topBarHorizontalPadding),
       decoration: const BoxDecoration(
         color: AppColors.surface,
-        border: Border(
-          bottom: BorderSide(color: AppColors.border, width: 1),
-        ),
+        border: Border(bottom: BorderSide(color: AppColors.border, width: 1)),
       ),
-      child: Row(
-        children: [
+      child: content,
+    );
+  }
+}
+
+/// Brand block (logo + title/subtitle). Becomes a tappable, tooltip-bearing
+/// button when [onTap] is provided (used to go home from the player).
+class _Brand extends StatelessWidget {
+  const _Brand({
+    required this.title,
+    this.subtitle,
+    this.onTap,
+    this.showLogo = true,
+  });
+
+  final String title;
+  final String? subtitle;
+  final VoidCallback? onTap;
+  final bool showLogo;
+
+  @override
+  Widget build(BuildContext context) {
+    final content = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (showLogo) ...[
           const AppLogo(size: 38),
-          const SizedBox(width: 12),
+          if (title.isNotEmpty) const SizedBox(width: 12),
+        ],
+        if (title.isNotEmpty)
           Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -65,21 +172,25 @@ class TopBar extends StatelessWidget {
                 ),
             ],
           ),
-          const SizedBox(width: 24),
-          if (search != null)
-            Expanded(
-              child: Center(
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 460),
-                  child: _SearchField(search: search!),
-                ),
-              ),
-            )
-          else
-            const Spacer(),
-          const SizedBox(width: 12),
-          ...trailing,
-        ],
+      ],
+    );
+
+    if (onTap == null) return content;
+
+    return Tooltip(
+      message: 'Back to sources',
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(10),
+          hoverColor: AppColors.surfaceMuted,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            child: content,
+          ),
+        ),
       ),
     );
   }
@@ -210,7 +321,9 @@ class TopBarButton extends StatelessWidget {
                           height: 14,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(iconColor),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              iconColor,
+                            ),
                           ),
                         )
                       : Icon(icon, size: 18, color: iconColor),
@@ -226,6 +339,52 @@ class TopBarButton extends StatelessWidget {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A square, bordered icon-only button for the top bar (e.g. the home button
+/// placed next to the brand).
+class TopBarIconButton extends StatelessWidget {
+  const TopBarIconButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(10),
+          hoverColor: AppColors.surfaceMuted,
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Icon(
+              icon,
+              size: 20,
+              color: enabled ? AppColors.accent : AppColors.textMuted,
+            ),
           ),
         ),
       ),
