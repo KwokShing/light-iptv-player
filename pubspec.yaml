@@ -47,6 +47,7 @@ dependencies:
   # decryption run in a local proxy so libmpv only ever sees clear fMP4.
   xml: ^6.5.0
   pointycastle: ^3.9.1
+  provider: ^6.1.5+1
 
 dev_dependencies:
   flutter_test:

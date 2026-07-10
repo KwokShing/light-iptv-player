@@ -1,0 +1,360 @@
+import 'package:flutter/material.dart';
+
+import '../models/playlist.dart';
+import 'common.dart';
+
+class PlaybackControls extends StatelessWidget {
+  const PlaybackControls({
+    super.key,
+    required this.streamUrlController,
+    required this.nowPlaying,
+    required this.playbackInfo,
+    required this.isPlaying,
+    required this.muted,
+    required this.volume,
+    required this.position,
+    required this.duration,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
+    required this.hwActive,
+    required this.onReplay,
+    required this.onPlayPause,
+    required this.onStop,
+    required this.onMute,
+    required this.onVolume,
+    required this.onSnapshot,
+    required this.onFullscreen,
+  });
+
+  final TextEditingController streamUrlController;
+  final Channel? nowPlaying;
+  final String playbackInfo;
+  final bool isPlaying;
+  final bool muted;
+  final double volume;
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onSeekChanged;
+  final ValueChanged<double>? onSeekEnd;
+  final bool hwActive;
+  final VoidCallback? onReplay;
+  final VoidCallback? onPlayPause;
+  final VoidCallback? onStop;
+  final VoidCallback? onMute;
+  final ValueChanged<double>? onVolume;
+  final VoidCallback? onSnapshot;
+  final VoidCallback? onFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 620;
+        final hasChannel = nowPlaying != null;
+        return Container(
+          margin: const EdgeInsets.only(top: 10),
+          padding: const EdgeInsets.fromLTRB(14, 10, 10, 6),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xffe9edf3)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0f000000),
+                blurRadius: 12,
+                offset: Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false)) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: Text(
+                    nowPlaying!.name,
+                    style: const TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xff2b2f36),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 6),
+              ],
+              SizedBox(
+                height: 34,
+                child: TextField(
+                  controller: streamUrlController,
+                  readOnly: true,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    color: Color(0xff5f6772),
+                  ),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xfff2f4f8),
+                    hintText: 'Stream URL',
+                    hintStyle: const TextStyle(
+                      fontSize: 12.5,
+                      color: Color(0xffb0b7c3),
+                    ),
+                    prefixIcon: const Icon(
+                      Icons.link_rounded,
+                      size: 17,
+                      color: Color(0xffb0b7c3),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(
+                      minWidth: 32,
+                      minHeight: 0,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 9),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(10),
+                      borderSide: BorderSide.none,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 2),
+              SeekBar(
+                position: position,
+                duration: duration,
+                onChanged: onSeekChanged,
+                onChangeEnd: onSeekEnd,
+              ),
+              Row(
+                children: [
+                  TransportButton(
+                    icon: isPlaying
+                        ? Icons.pause_rounded
+                        : Icons.play_arrow_rounded,
+                    tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
+                    onPressed: onPlayPause,
+                    primary: true,
+                  ),
+                  TransportButton(
+                    icon: Icons.stop_rounded,
+                    tooltip: 'Stop (S)',
+                    onPressed: onStop,
+                  ),
+                  TransportButton(
+                    icon: Icons.refresh_rounded,
+                    tooltip: 'Reload stream',
+                    onPressed: onReplay,
+                  ),
+                  const SizedBox(width: 6),
+                  TransportButton(
+                    icon: muted || volume == 0
+                        ? Icons.volume_off_rounded
+                        : volume < 50
+                        ? Icons.volume_down_rounded
+                        : Icons.volume_up_rounded,
+                    tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                    onPressed: onMute,
+                  ),
+                  SizedBox(
+                    width: compact ? 72 : 110,
+                    child: SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: 3,
+                        thumbShape: const RoundSliderThumbShape(
+                          enabledThumbRadius: 6,
+                        ),
+                        overlayShape: const RoundSliderOverlayShape(
+                          overlayRadius: 12,
+                        ),
+                      ),
+                      child: Slider(
+                        value: volume.clamp(0, 100),
+                        max: 100,
+                        onChanged: hasChannel ? onVolume : null,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 30,
+                    child: Text(
+                      '${volume.round()}',
+                      style: const TextStyle(
+                        color: Color(0xff7d8490),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const Spacer(),
+                  Flexible(
+                    child: Text(
+                      playbackInfo,
+                      textAlign: TextAlign.end,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xff7d8490),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 3,
+                    ),
+                    decoration: BoxDecoration(
+                      color: hwActive
+                          ? const Color(0x1a8357f7)
+                          : const Color(0xffeef0f4),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      hwActive ? 'HW' : 'SW',
+                      style: TextStyle(
+                        color: hwActive
+                            ? const Color(0xff8357f7)
+                            : const Color(0xff7d8490),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  TransportButton(
+                    icon: Icons.photo_camera_outlined,
+                    tooltip: 'Snapshot',
+                    onPressed: onSnapshot,
+                  ),
+                  TransportButton(
+                    icon: Icons.fullscreen_rounded,
+                    tooltip: 'Fullscreen (F / double-click)',
+                    onPressed: onFullscreen,
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Auto-hiding transport overlay shown over the video while in fullscreen.
+class FullscreenControls extends StatelessWidget {
+  const FullscreenControls({
+    super.key,
+    required this.visible,
+    required this.isPlaying,
+    required this.muted,
+    required this.title,
+    required this.position,
+    required this.duration,
+    required this.onSeekChanged,
+    required this.onSeekEnd,
+    required this.onPlayPause,
+    required this.onStop,
+    required this.onMute,
+    required this.onSnapshot,
+    required this.onExitFullscreen,
+  });
+
+  final bool visible;
+  final bool isPlaying;
+  final bool muted;
+  final String? title;
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<double>? onSeekChanged;
+  final ValueChanged<double>? onSeekEnd;
+  final VoidCallback? onPlayPause;
+  final VoidCallback? onStop;
+  final VoidCallback? onMute;
+  final VoidCallback? onSnapshot;
+  final VoidCallback? onExitFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        ignoring: !visible,
+        child: AnimatedOpacity(
+          opacity: visible ? 1 : 0,
+          duration: const Duration(milliseconds: 180),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: [Color(0xcc000000), Color(0x00000000)],
+              ),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SeekBar(
+                  position: position,
+                  duration: duration,
+                  onChanged: onSeekChanged,
+                  onChangeEnd: onSeekEnd,
+                  dark: true,
+                ),
+                Row(
+                  children: [
+                    TransportButton(
+                      icon: isPlaying ? Icons.pause : Icons.play_arrow,
+                      tooltip: isPlaying ? 'Pause (Space)' : 'Play (Space)',
+                      onPressed: onPlayPause,
+                      color: Colors.white,
+                    ),
+                    TransportButton(
+                      icon: Icons.stop,
+                      tooltip: 'Stop (S)',
+                      onPressed: onStop,
+                      color: Colors.white,
+                    ),
+                    TransportButton(
+                      icon: muted ? Icons.volume_off : Icons.volume_up,
+                      tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                      onPressed: onMute,
+                      color: Colors.white,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        title ?? '',
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    TransportButton(
+                      icon: Icons.photo_camera_outlined,
+                      tooltip: 'Snapshot',
+                      onPressed: onSnapshot,
+                      color: Colors.white,
+                    ),
+                    TransportButton(
+                      icon: Icons.fullscreen_exit,
+                      tooltip: 'Exit fullscreen (F / Esc)',
+                      onPressed: onExitFullscreen,
+                      color: Colors.white,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
