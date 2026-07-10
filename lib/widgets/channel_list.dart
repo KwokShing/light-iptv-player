@@ -4,114 +4,63 @@ import 'package:flutter/material.dart';
 
 import '../constants.dart';
 import '../models/playlist.dart';
+import '../theme.dart';
 import 'common.dart';
 
-class Sidebar extends StatefulWidget {
+/// Left navigation column showing the source name and its group list.
+/// Search lives in the app top bar now, so this only holds groups.
+class Sidebar extends StatelessWidget {
   const Sidebar({
     super.key,
     required this.source,
     required this.groups,
     required this.activeGroup,
-    required this.onBack,
-    required this.onSearch,
     required this.onGroup,
   });
 
   final PlaylistSource source;
   final Map<String, int> groups;
   final String activeGroup;
-  final VoidCallback onBack;
-  final ValueChanged<String> onSearch;
   final ValueChanged<String> onGroup;
-
-  @override
-  State<Sidebar> createState() => _SidebarState();
-}
-
-class _SidebarState extends State<Sidebar> {
-  final TextEditingController _searchController = TextEditingController();
-
-  @override
-  void didUpdateWidget(Sidebar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.source.id != widget.source.id &&
-        _searchController.text.isNotEmpty) {
-      _searchController.clear();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) widget.onSearch('');
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _searchController.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: const Color(0xffeef1f6),
-      padding: const EdgeInsets.all(14),
+      decoration: const BoxDecoration(
+        color: AppColors.sidebar,
+        border: Border(right: BorderSide(color: AppColors.border, width: 1)),
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 18, 14, 14),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: double.infinity,
-            child: OutlinedButton(
-              onPressed: widget.onBack,
-              child: const Align(
-                alignment: Alignment.centerLeft,
-                child: Text('← Sources'),
-              ),
+          Text(
+            source.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+              color: AppColors.textPrimary,
             ),
           ),
-          const SizedBox(height: 20),
-          TextField(
-            controller: _searchController,
-            onChanged: (value) {
-              widget.onSearch(value);
-              setState(() {});
-            },
-            decoration: InputDecoration(
-              filled: true,
-              fillColor: Colors.white,
-              hintText: 'Search channels',
-              border: const OutlineInputBorder(),
-              suffixIcon: _searchController.text.isEmpty
-                  ? null
-                  : IconButton(
-                      icon: const Icon(Icons.clear),
-                      tooltip: 'Clear search',
-                      onPressed: () {
-                        _searchController.clear();
-                        widget.onSearch('');
-                        setState(() {});
-                      },
-                    ),
-            ),
-          ),
-          const SizedBox(height: 18),
-          const Divider(),
           Text(
-            widget.source.name,
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w900),
+            '${groups.length - 1} groups',
+            style: const TextStyle(color: AppColors.textMuted),
           ),
-          Text(
-            '${widget.groups.length - 1} groups',
-            style: const TextStyle(color: Color(0xff7d8490)),
-          ),
-          const SizedBox(height: 18),
+          const SizedBox(height: 14),
+          const Divider(height: 1, color: AppColors.border),
+          const SizedBox(height: 8),
           Expanded(
             child: ListView(
-              children: widget.groups.entries.map((entry) {
-                final selected = entry.key == widget.activeGroup;
+              padding: EdgeInsets.zero,
+              children: groups.entries.map((entry) {
+                final selected = entry.key == activeGroup;
                 return _GroupTile(
                   label: entry.key,
                   count: entry.value,
                   selected: selected,
-                  onTap: () => widget.onGroup(entry.key),
+                  onTap: () => onGroup(entry.key),
                 );
               }).toList(),
             ),
@@ -138,13 +87,14 @@ class _GroupTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: Material(
-        color: selected ? const Color(0xffeee6ff) : Colors.transparent,
+        color: selected ? AppColors.selected : Colors.transparent,
         borderRadius: BorderRadius.circular(8),
         child: InkWell(
           onTap: onTap,
           borderRadius: BorderRadius.circular(8),
+          hoverColor: AppColors.surfaceMuted,
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
             child: Row(
@@ -153,16 +103,18 @@ class _GroupTile extends StatelessWidget {
                   child: Text(
                     label,
                     style: TextStyle(
-                      fontWeight: selected ? FontWeight.w900 : FontWeight.w500,
-                      color: selected ? const Color(0xff8357f7) : null,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                      color: selected
+                          ? AppColors.accent
+                          : AppColors.textSecondary,
                     ),
                   ),
                 ),
                 Text(
                   '$count',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xff6f7681),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: selected ? AppColors.accent : AppColors.textMuted,
                   ),
                 ),
               ],
@@ -257,29 +209,36 @@ class _ChannelListState extends State<ChannelList> {
   Widget build(BuildContext context) {
     final channels = widget.channels;
     return Container(
-      color: const Color(0xfff4efff),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(right: BorderSide(color: AppColors.border, width: 1)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Padding(
-            padding: const EdgeInsets.all(22),
+            padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
                   widget.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                    fontSize: 26,
+                    fontSize: 22,
                     fontWeight: FontWeight.w900,
+                    color: AppColors.textPrimary,
                   ),
                 ),
                 Text(
                   '${channels.length} channels',
-                  style: const TextStyle(color: Color(0xff7d8490)),
+                  style: const TextStyle(color: AppColors.textMuted),
                 ),
               ],
             ),
           ),
+          const Divider(height: 1, color: AppColors.border),
           Expanded(
             child: NotificationListener<ScrollNotification>(
               onNotification: _onScroll,
@@ -332,19 +291,30 @@ class _ChannelTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: selected ? const Color(0xffeee6ff) : Colors.transparent,
+      color: selected ? AppColors.selected : Colors.transparent,
       child: InkWell(
         onTap: onTap,
+        hoverColor: AppColors.surfaceMuted,
         child: Container(
           height: channelRowHeight,
           decoration: const BoxDecoration(
             border: Border(
-              bottom: BorderSide(color: Color(0x1f000000), width: 1),
+              bottom: BorderSide(color: AppColors.border, width: 1),
             ),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(
             children: [
+              if (selected)
+                Container(
+                  width: 3,
+                  height: 34,
+                  margin: const EdgeInsets.only(right: 9),
+                  decoration: BoxDecoration(
+                    color: AppColors.accent,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
               ChannelLogo(url: channel.logo, load: loadLogo),
               const SizedBox(width: 10),
               Expanded(
@@ -360,9 +330,12 @@ class _ChannelTile extends StatelessWidget {
                             channel.name,
                             maxLines: showGroup ? 1 : 2,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w800,
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
                               height: 1.15,
+                              color: selected
+                                  ? AppColors.accent
+                                  : AppColors.textPrimary,
                             ),
                           ),
                         ),
@@ -378,7 +351,7 @@ class _ChannelTile extends StatelessWidget {
                         channel.group,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: Color(0xff7d8490)),
+                        style: const TextStyle(color: AppColors.textMuted),
                       ),
                     ],
                   ],

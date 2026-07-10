@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/playlist.dart';
+import '../theme.dart';
 import 'common.dart';
 
 class PlaybackControls extends StatelessWidget {
@@ -52,20 +53,9 @@ class PlaybackControls extends StatelessWidget {
         final compact = constraints.maxWidth < 620;
         final hasChannel = nowPlaying != null;
         return Container(
-          margin: const EdgeInsets.only(top: 10),
-          padding: const EdgeInsets.fromLTRB(14, 10, 10, 6),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xffe9edf3)),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x0f000000),
-                blurRadius: 12,
-                offset: Offset(0, 4),
-              ),
-            ],
-          ),
+          margin: const EdgeInsets.only(top: 12),
+          padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
+          decoration: cardDecoration(radius: 14),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -77,7 +67,7 @@ class PlaybackControls extends StatelessWidget {
                     style: const TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w800,
-                      color: Color(0xff2b2f36),
+                      color: AppColors.textPrimary,
                     ),
                   ),
                 ),
@@ -90,21 +80,21 @@ class PlaybackControls extends StatelessWidget {
                   readOnly: true,
                   style: const TextStyle(
                     fontSize: 12.5,
-                    color: Color(0xff5f6772),
+                    color: AppColors.textSecondary,
                   ),
                   decoration: InputDecoration(
                     isDense: true,
                     filled: true,
-                    fillColor: const Color(0xfff2f4f8),
+                    fillColor: AppColors.surfaceMuted,
                     hintText: 'Stream URL',
                     hintStyle: const TextStyle(
                       fontSize: 12.5,
-                      color: Color(0xffb0b7c3),
+                      color: AppColors.textMuted,
                     ),
                     prefixIcon: const Icon(
                       Icons.link_rounded,
                       size: 17,
-                      color: Color(0xffb0b7c3),
+                      color: AppColors.textMuted,
                     ),
                     prefixIconConstraints: const BoxConstraints(
                       minWidth: 32,
@@ -160,6 +150,10 @@ class PlaybackControls extends StatelessWidget {
                     child: SliderTheme(
                       data: SliderTheme.of(context).copyWith(
                         trackHeight: 3,
+                        activeTrackColor: AppColors.accent,
+                        inactiveTrackColor: AppColors.border,
+                        thumbColor: AppColors.accent,
+                        overlayColor: const Color(0x333b6ef5),
                         thumbShape: const RoundSliderThumbShape(
                           enabledThumbRadius: 6,
                         ),
@@ -179,7 +173,7 @@ class PlaybackControls extends StatelessWidget {
                     child: Text(
                       '${volume.round()}',
                       style: const TextStyle(
-                        color: Color(0xff7d8490),
+                        color: AppColors.textMuted,
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
                       ),
@@ -192,7 +186,7 @@ class PlaybackControls extends StatelessWidget {
                       textAlign: TextAlign.end,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        color: Color(0xff7d8490),
+                        color: AppColors.textMuted,
                         fontSize: 12,
                         fontWeight: FontWeight.w600,
                       ),
@@ -201,21 +195,26 @@ class PlaybackControls extends StatelessWidget {
                   const SizedBox(width: 8),
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 7,
-                      vertical: 3,
+                      horizontal: 8,
+                      vertical: 4,
                     ),
                     decoration: BoxDecoration(
                       color: hwActive
-                          ? const Color(0x1a8357f7)
-                          : const Color(0xffeef0f4),
+                          ? AppColors.accentSoft
+                          : AppColors.surfaceMuted,
                       borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: hwActive
+                            ? AppColors.accentBorder
+                            : AppColors.border,
+                      ),
                     ),
                     child: Text(
                       hwActive ? 'HW' : 'SW',
                       style: TextStyle(
                         color: hwActive
-                            ? const Color(0xff8357f7)
-                            : const Color(0xff7d8490),
+                            ? AppColors.accent
+                            : AppColors.textMuted,
                         fontSize: 11,
                         fontWeight: FontWeight.w700,
                       ),

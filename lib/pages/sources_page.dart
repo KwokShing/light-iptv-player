@@ -9,7 +9,9 @@ import '../controllers/ui_controller.dart';
 import '../controllers/update_controller.dart';
 import '../models/playlist.dart';
 import '../services/playlist_parser.dart';
+import '../theme.dart';
 import '../widgets/source_widgets.dart';
+import '../widgets/top_bar.dart';
 
 class SourcesPage extends StatelessWidget {
   const SourcesPage({super.key});
@@ -209,63 +211,64 @@ class SourcesPage extends StatelessWidget {
     final sources = context.watch<SourcesController>();
     final update = context.watch<UpdateController>();
     return Scaffold(
+      backgroundColor: AppColors.bg,
       body: Column(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(24, 18, 24, 12),
-            child: Row(
-              children: [
-                const HeaderBrand(),
-                const SizedBox(width: 12),
-                TextButton.icon(
-                  onPressed: () => _addLocalSource(context),
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('Load M3U File'),
-                ),
-                const SizedBox(width: 12),
-                TextButton.icon(
-                  onPressed: () => _addOnlineSource(context),
-                  icon: const Icon(Icons.link),
-                  label: const Text('Online M3U Link'),
-                ),
-                const SizedBox(width: 12),
-                TextButton.icon(
-                  onPressed: () => _addSingleChannel(context),
-                  icon: const Icon(Icons.play_circle_outline),
-                  label: const Text('Single Channel'),
-                ),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: sources.refreshingAll ? null : sources.refreshAll,
-                  icon: SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: Center(
-                      child: sources.refreshingAll
-                          ? const SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(strokeWidth: 2),
-                            )
-                          : const Icon(Icons.refresh, size: 18),
-                    ),
-                  ),
-                  label: const Text('Refresh All'),
-                ),
-              ],
-            ),
+          TopBar(
+            title: 'Light IPTV Player',
+            subtitle: '${sources.sources.length} sources',
+            trailing: [
+              _AddSourceButton(
+                onLocal: () => _addLocalSource(context),
+                onOnline: () => _addOnlineSource(context),
+                onSingle: () => _addSingleChannel(context),
+              ),
+              const SizedBox(width: 10),
+              TopBarButton(
+                icon: Icons.refresh_rounded,
+                label: 'Refresh All',
+                busy: sources.refreshingAll,
+                onPressed: sources.refreshingAll ? null : sources.refreshAll,
+              ),
+            ],
           ),
-          if (update.availableUpdate != null) _UpdateBanner(update: update),
+          if (update.availableUpdate != null) ...[
+            const SizedBox(height: 12),
+            _UpdateBanner(update: update),
+          ],
           Expanded(
             child: sources.sources.isEmpty
-                ? const Center(
-                    child: Text(
-                      'Create a source to start watching.',
-                      style: TextStyle(color: Color(0xff7d8490)),
+                ? Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 64,
+                          height: 64,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: AppColors.accentSoft,
+                            border: Border.all(color: AppColors.accentBorder),
+                          ),
+                          child: const Icon(
+                            Icons.playlist_add_rounded,
+                            color: AppColors.accent,
+                            size: 30,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'Create a source to start watching.',
+                          style: TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 15,
+                          ),
+                        ),
+                      ],
                     ),
                   )
                 : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
+                    padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
                     itemBuilder: (context, index) {
                       final source = sources.sources[index];
                       return SourceTile(
@@ -291,6 +294,110 @@ class SourcesPage extends StatelessWidget {
   }
 }
 
+/// "+ Add Source" primary button with a dropdown of the three source kinds.
+class _AddSourceButton extends StatelessWidget {
+  const _AddSourceButton({
+    required this.onLocal,
+    required this.onOnline,
+    required this.onSingle,
+  });
+
+  final VoidCallback onLocal;
+  final VoidCallback onOnline;
+  final VoidCallback onSingle;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<int>(
+      tooltip: 'Add a source',
+      position: PopupMenuPosition.under,
+      color: AppColors.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: const BorderSide(color: AppColors.border),
+      ),
+      onSelected: (value) {
+        switch (value) {
+          case 0:
+            onLocal();
+          case 1:
+            onOnline();
+          case 2:
+            onSingle();
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(
+          value: 0,
+          child: _AddMenuRow(
+            icon: Icons.folder_open_rounded,
+            label: 'Load M3U File',
+          ),
+        ),
+        PopupMenuItem(
+          value: 1,
+          child: _AddMenuRow(icon: Icons.link_rounded, label: 'Online M3U Link'),
+        ),
+        PopupMenuItem(
+          value: 2,
+          child: _AddMenuRow(
+            icon: Icons.play_circle_outline_rounded,
+            label: 'Single Channel',
+          ),
+        ),
+      ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: AppColors.accent,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.add_rounded, size: 18, color: Colors.white),
+            SizedBox(width: 8),
+            Text(
+              'Add Source',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 13.5,
+              ),
+            ),
+            SizedBox(width: 4),
+            Icon(Icons.arrow_drop_down_rounded, size: 20, color: Colors.white),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AddMenuRow extends StatelessWidget {
+  const _AddMenuRow({required this.icon, required this.label});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: AppColors.accent),
+        const SizedBox(width: 10),
+        Text(
+          label,
+          style: const TextStyle(
+            color: AppColors.textPrimary,
+            fontSize: 13.5,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _UpdateBanner extends StatelessWidget {
   const _UpdateBanner({required this.update});
   final UpdateController update;
@@ -307,13 +414,13 @@ class _UpdateBanner extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(24, 0, 24, 12),
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        color: const Color(0xffeef0ff),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xffc7c2ff)),
+        color: AppColors.accentSoft,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.accentBorder),
       ),
       child: Row(
         children: [
-          const Icon(Icons.system_update, color: Color(0xff6b5bff)),
+          const Icon(Icons.system_update_rounded, color: AppColors.accent),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -326,18 +433,27 @@ class _UpdateBanner extends StatelessWidget {
                             ? 'Downloading update...'
                             : 'Downloading update... $progressPercent%')
                       : 'New version ${release.tag} available',
-                  style: const TextStyle(fontWeight: FontWeight.w700),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.textPrimary,
+                  ),
                 ),
                 if (updating && updateProgress != null) ...[
                   const SizedBox(height: 6),
                   ClipRRect(
                     borderRadius: BorderRadius.circular(4),
-                    child: LinearProgressIndicator(value: updateProgress),
+                    child: LinearProgressIndicator(
+                      value: updateProgress,
+                      backgroundColor: AppColors.border,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                        AppColors.accent,
+                      ),
+                    ),
                   ),
                 ] else if (!updating)
                   const Text(
                     'The update zip will be saved to the app folder for you to install.',
-                    style: TextStyle(color: Color(0xff7d8490), fontSize: 12),
+                    style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
                   ),
               ],
             ),
@@ -347,17 +463,27 @@ class _UpdateBanner extends StatelessWidget {
             const SizedBox(
               width: 18,
               height: 18,
-              child: CircularProgressIndicator(strokeWidth: 2),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent),
+              ),
             )
           else ...[
             TextButton(
               onPressed: update.dismiss,
+              style: TextButton.styleFrom(
+                foregroundColor: AppColors.textSecondary,
+              ),
               child: const Text('Later'),
             ),
             const SizedBox(width: 8),
             FilledButton.icon(
               onPressed: update.startUpdate,
-              icon: const Icon(Icons.download),
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.accent,
+                foregroundColor: Colors.white,
+              ),
+              icon: const Icon(Icons.download_rounded),
               label: const Text('Download'),
             ),
           ],

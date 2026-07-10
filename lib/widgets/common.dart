@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../services/ping_service.dart';
+import '../theme.dart';
 
 /// Compact icon button used across the transport bars.
 class TransportButton extends StatelessWidget {
@@ -22,14 +23,48 @@ class TransportButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final enabled = onPressed != null;
+    // The primary (play/pause) button is a solid accent circle.
+    if (primary) {
+      return Tooltip(
+        message: tooltip,
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Material(
+            color: Colors.transparent,
+            shape: const CircleBorder(),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onPressed,
+              customBorder: const CircleBorder(),
+              child: Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: enabled ? AppColors.accent : AppColors.surfaceMuted,
+                ),
+                child: Icon(
+                  icon,
+                  size: 22,
+                  color: enabled ? Colors.white : AppColors.textMuted,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     final resolvedColor =
-        color ?? (primary ? const Color(0xff8357f7) : const Color(0xff5f6772));
+        color ?? (enabled ? AppColors.textSecondary : AppColors.textMuted);
     return IconButton(
       icon: Icon(icon),
       tooltip: tooltip,
       onPressed: onPressed,
       color: resolvedColor,
-      iconSize: primary ? 24 : 20,
+      hoverColor: AppColors.surfaceMuted,
+      iconSize: 20,
       padding: const EdgeInsets.all(6),
       constraints: const BoxConstraints(),
       visualDensity: VisualDensity.compact,
@@ -73,7 +108,7 @@ class SeekBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textColor = dark ? Colors.white70 : const Color(0xff7d8490);
+    final textColor = dark ? Colors.white70 : AppColors.textSecondary;
     final totalMs = duration.inMilliseconds;
     final isLive = totalMs <= 0;
     final labelStyle = TextStyle(
@@ -92,18 +127,24 @@ class SeekBar extends StatelessWidget {
               width: 8,
               height: 8,
               decoration: const BoxDecoration(
-                color: Color(0xffe53935),
+                color: AppColors.live,
                 shape: BoxShape.circle,
               ),
             ),
             const SizedBox(width: 8),
-            Text('LIVE', style: labelStyle),
+            Text(
+              'LIVE',
+              style: labelStyle.copyWith(
+                letterSpacing: 1.2,
+                color: dark ? Colors.white : AppColors.live,
+              ),
+            ),
             const SizedBox(width: 12),
             Expanded(
               child: Container(
                 height: 3,
                 decoration: BoxDecoration(
-                  color: dark ? Colors.white24 : const Color(0xffe0e0e0),
+                  color: dark ? Colors.white24 : AppColors.border,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -128,12 +169,14 @@ class SeekBar extends StatelessWidget {
         Expanded(
           child: SliderTheme(
             data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
+              trackHeight: 4,
               thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
               overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
-              activeTrackColor: dark ? Colors.white : null,
-              thumbColor: dark ? Colors.white : null,
-              inactiveTrackColor: dark ? Colors.white30 : null,
+              activeTrackColor: dark ? Colors.white : AppColors.accent,
+              thumbColor: dark ? Colors.white : AppColors.accent,
+              overlayColor: const Color(0x333b6ef5),
+              inactiveTrackColor:
+                  dark ? Colors.white24 : AppColors.border,
             ),
             child: Slider(
               value: positionMs,
@@ -168,15 +211,18 @@ class AppLogo extends StatelessWidget {
       width: size,
       height: size,
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        gradient: const LinearGradient(
-          colors: [Color(0xff7c4dff), Color(0xffa156ff)],
-        ),
+        borderRadius: BorderRadius.circular(size * 0.24),
+        color: AppColors.accent,
       ),
       alignment: Alignment.center,
-      child: const Text(
+      child: Text(
         'IPTV',
-        style: TextStyle(color: Colors.white, fontWeight: FontWeight.w900),
+        style: TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w900,
+          fontSize: size * 0.26,
+          letterSpacing: 0.5,
+        ),
       ),
     );
   }
@@ -189,19 +235,23 @@ class Tag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final fg = green ? AppColors.good : AppColors.accent;
+    final bg = green ? const Color(0xffe6f6ee) : AppColors.accentSoft;
+    final bd = green ? const Color(0xffb7e3cb) : AppColors.accentBorder;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: green ? const Color(0xffe5fff4) : const Color(0xfff0e8ff),
-        borderRadius: BorderRadius.circular(4),
-        border: Border.all(
-          color: green ? const Color(0xff76d7ba) : const Color(0xffcdb7ff),
-        ),
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: bd),
       ),
       child: Text(
         label,
         style: TextStyle(
-          color: green ? const Color(0xff0b9b6b) : const Color(0xff8357f7),
+          color: fg,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+          letterSpacing: 0.2,
         ),
       ),
     );
@@ -226,14 +276,14 @@ class ChannelLogo extends StatelessWidget {
       width: 46,
       height: 46,
       decoration: BoxDecoration(
-        // Dark violet tile: most TV channel logos are white/light artwork, so a
-        // light background made them nearly invisible.
-        color: const Color(0xff2a2540),
+        // Neutral dark-ish tile so white channel artwork stays visible while
+        // still reading as light-theme (soft, not black).
+        color: const Color(0xff2b3242),
         borderRadius: BorderRadius.circular(10),
       ),
       clipBehavior: Clip.antiAlias,
       child: !hasLogo || (!load && !alreadyLoaded)
-          ? const Icon(Icons.tv, color: Color(0xff8891a3))
+          ? const Icon(Icons.tv_rounded, color: Color(0xff8b93a3))
           : Padding(
               padding: const EdgeInsets.all(5),
               child: Image.network(
@@ -248,7 +298,7 @@ class ChannelLogo extends StatelessWidget {
                   return child;
                 },
                 errorBuilder: (_, _, _) =>
-                    const Icon(Icons.tv, color: Color(0xff8891a3)),
+                    const Icon(Icons.tv_rounded, color: Color(0xff8b93a3)),
               ),
             ),
     );
@@ -312,7 +362,7 @@ class _ChannelPingState extends State<ChannelPing> {
         width: 8,
         height: 8,
         decoration: const BoxDecoration(
-          color: Color(0xffe23c3c),
+          color: AppColors.danger,
           shape: BoxShape.circle,
         ),
       );
@@ -320,7 +370,7 @@ class _ChannelPingState extends State<ChannelPing> {
     return Text(
       '${result.ms} ms',
       style: const TextStyle(
-        color: Color(0xff1faa59),
+        color: AppColors.good,
         fontWeight: FontWeight.w700,
         fontSize: 12,
       ),

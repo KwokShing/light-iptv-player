@@ -4,6 +4,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../models/playlist.dart';
 import '../services/playlist_parser.dart';
+import '../theme.dart';
 import 'common.dart';
 
 class SourceDialogResult {
@@ -22,7 +23,7 @@ Future<SourceDialogResult?> showSourceDialog(
   return showDialog<SourceDialogResult>(
     context: context,
     builder: (context) => AlertDialog(
-      title: Text(title),
+      title: Text(title, style: const TextStyle(color: AppColors.textPrimary)),
       content: SizedBox(
         width: 420,
         child: Column(
@@ -31,12 +32,24 @@ Future<SourceDialogResult?> showSourceDialog(
             TextField(
               controller: name,
               autofocus: true,
-              decoration: const InputDecoration(labelText: 'Name'),
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                focusedBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: AppColors.accent),
+                ),
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: source,
-              decoration: InputDecoration(labelText: urlLabel),
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: InputDecoration(
+                labelText: urlLabel,
+                focusedBorder: const UnderlineInputBorder(
+                  borderSide: BorderSide(color: AppColors.accent),
+                ),
+              ),
             ),
           ],
         ),
@@ -44,9 +57,13 @@ Future<SourceDialogResult?> showSourceDialog(
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
+          style: TextButton.styleFrom(
+            foregroundColor: AppColors.textSecondary,
+          ),
           child: const Text('Cancel'),
         ),
         FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: AppColors.accent),
           onPressed: () {
             final nextName = name.text.trim();
             final nextSource = source.text.trim();
@@ -144,7 +161,10 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
   Widget build(BuildContext context) {
     final isLocal = widget.source.kind == SourceKind.local;
     return AlertDialog(
-      title: const Text('Edit Source'),
+      title: const Text(
+        'Edit Source',
+        style: TextStyle(color: AppColors.textPrimary),
+      ),
       content: SizedBox(
         width: 420,
         child: Column(
@@ -153,13 +173,25 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
             TextField(
               controller: nameController,
               autofocus: true,
-              decoration: const InputDecoration(labelText: 'Name'),
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: const InputDecoration(
+                labelText: 'Name',
+                focusedBorder: UnderlineInputBorder(
+                  borderSide: BorderSide(color: AppColors.accent),
+                ),
+              ),
             ),
             if (!isLocal) ...[
               const SizedBox(height: 12),
               TextField(
                 controller: urlController,
-                decoration: const InputDecoration(labelText: 'URL'),
+                style: const TextStyle(color: AppColors.textPrimary),
+                decoration: const InputDecoration(
+                  labelText: 'URL',
+                  focusedBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: AppColors.accent),
+                  ),
+                ),
               ),
             ],
             if (isLocal) ...[
@@ -168,7 +200,10 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
                 alignment: Alignment.centerLeft,
                 child: TextButton.icon(
                   onPressed: _pickFile,
-                  icon: const Icon(Icons.folder_open),
+                  style: TextButton.styleFrom(
+                    foregroundColor: AppColors.accent,
+                  ),
+                  icon: const Icon(Icons.folder_open_rounded),
                   label: const Text('Load different M3U file'),
                 ),
               ),
@@ -179,9 +214,13 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
+          style: TextButton.styleFrom(
+            foregroundColor: AppColors.textSecondary,
+          ),
           child: const Text('Cancel'),
         ),
         FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: AppColors.accent),
           onPressed: () {
             final name = nameController.text.trim();
             final url = urlController.text.trim();
@@ -224,7 +263,11 @@ class HeaderBrand extends StatelessWidget {
                   'Light IPTV Player',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 24, fontWeight: FontWeight.w800),
+                  style: TextStyle(
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                    color: AppColors.textPrimary,
+                  ),
                 ),
                 // Version read from the bundle instead of a hardcoded string so
                 // it can never drift from pubspec.yaml.
@@ -234,7 +277,7 @@ class HeaderBrand extends StatelessWidget {
                     final version = snapshot.data?.version;
                     return Text(
                       version == null ? '' : 'v$version',
-                      style: const TextStyle(color: Color(0xff7d8490)),
+                      style: const TextStyle(color: AppColors.textMuted),
                     );
                   },
                 ),
@@ -268,27 +311,23 @@ class SourceTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(10),
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(12),
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
+        hoverColor: AppColors.surfaceMuted,
         child: Container(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xffd9c7ff), width: 1.4),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x0f7c4dff),
-                blurRadius: 14,
-                offset: Offset(0, 4),
-              ),
-            ],
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.border, width: 1),
+            boxShadow: cardShadow(),
           ),
           child: Row(
             children: [
-              const AppLogo(size: 46),
+              const AppLogo(size: 48),
               const SizedBox(width: 14),
               Expanded(
                 child: Wrap(
@@ -305,6 +344,7 @@ class SourceTile extends StatelessWidget {
                         style: const TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w800,
+                          color: AppColors.textPrimary,
                         ),
                       ),
                     ),
@@ -318,7 +358,7 @@ class SourceTile extends StatelessWidget {
                     if (source.cached) const Tag(label: 'Cached', green: true),
                     Text(
                       '${source.channels.length} channels',
-                      style: const TextStyle(color: Color(0xff7d8490)),
+                      style: const TextStyle(color: AppColors.textMuted),
                     ),
                   ],
                 ),
@@ -334,14 +374,20 @@ class SourceTile extends StatelessWidget {
                         height: 38,
                       ),
                       padding: EdgeInsets.zero,
+                      color: AppColors.textSecondary,
                       onPressed: isRefreshing ? null : onRefresh,
                       icon: isRefreshing
                           ? const SizedBox(
                               width: 18,
                               height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  AppColors.accent,
+                                ),
+                              ),
                             )
-                          : const Icon(Icons.refresh),
+                          : const Icon(Icons.refresh_rounded),
                     ),
                   IconButton(
                     constraints: const BoxConstraints.tightFor(
@@ -349,8 +395,9 @@ class SourceTile extends StatelessWidget {
                       height: 38,
                     ),
                     padding: EdgeInsets.zero,
+                    color: AppColors.textSecondary,
                     onPressed: onRename,
-                    icon: const Icon(Icons.edit),
+                    icon: const Icon(Icons.edit_rounded),
                   ),
                   IconButton(
                     constraints: const BoxConstraints.tightFor(
@@ -359,7 +406,10 @@ class SourceTile extends StatelessWidget {
                     ),
                     padding: EdgeInsets.zero,
                     onPressed: onDelete,
-                    icon: const Icon(Icons.delete, color: Color(0xffe0001b)),
+                    icon: const Icon(
+                      Icons.delete_rounded,
+                      color: AppColors.danger,
+                    ),
                   ),
                 ],
               ),

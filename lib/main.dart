@@ -11,6 +11,7 @@ import 'controllers/ui_controller.dart';
 import 'controllers/update_controller.dart';
 import 'pages/player_page.dart';
 import 'pages/sources_page.dart';
+import 'theme.dart';
 
 // Re-exported so existing imports (e.g. tests) that reference these from
 // `package:light_iptv_player/main.dart` keep working after the split.
@@ -30,10 +31,11 @@ Future<void> main() async {
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       title: 'Light IPTV Player',
-      // Height tuned so the video pane is ~16:9 at the default width, avoiding
-      // top/bottom black bars for the common 16:9 stream.
-      size: Size(1360, 680),
-      minimumSize: Size(1040, 520),
+      // Sized so the video pane lands close to 16:9 with the current chrome
+      // (64px top bar + 190+250 side columns + ~170px transport bar),
+      // minimizing the empty margin around a 16:9 stream.
+      size: Size(1446, 832),
+      minimumSize: Size(1120, 640),
       center: true,
     ),
     () async {
@@ -80,12 +82,30 @@ class IptvApp extends StatelessWidget {
         debugShowCheckedModeBanner: false,
         theme: ThemeData(
           colorScheme: ColorScheme.fromSeed(
-            seedColor: const Color(0xff8357f7),
+            seedColor: AppColors.accent,
             brightness: Brightness.light,
+            primary: AppColors.accent,
+            surface: AppColors.surface,
           ),
-          scaffoldBackgroundColor: const Color(0xfff6f8fc),
+          scaffoldBackgroundColor: AppColors.bg,
+          canvasColor: AppColors.surface,
           fontFamily: 'Segoe UI',
           useMaterial3: true,
+          dividerColor: AppColors.border,
+          textSelectionTheme: const TextSelectionThemeData(
+            cursorColor: AppColors.accent,
+            selectionColor: Color(0x333b6ef5),
+            selectionHandleColor: AppColors.accent,
+          ),
+          snackBarTheme: const SnackBarThemeData(
+            backgroundColor: AppColors.textPrimary,
+            contentTextStyle: TextStyle(color: Colors.white),
+            behavior: SnackBarBehavior.floating,
+          ),
+          dialogTheme: const DialogThemeData(
+            backgroundColor: AppColors.surface,
+            surfaceTintColor: Colors.transparent,
+          ),
         ),
         builder: (context, child) =>
             ExcludeSemantics(child: child ?? const SizedBox.shrink()),
@@ -139,7 +159,18 @@ class _IptvHomeState extends State<IptvHome> {
   Widget build(BuildContext context) {
     final loaded = context.select<SourcesController, bool>((s) => s.loaded);
     if (!loaded) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(
+        body: Center(
+          child: SizedBox(
+            width: 40,
+            height: 40,
+            child: CircularProgressIndicator(
+              strokeWidth: 3,
+              valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent),
+            ),
+          ),
+        ),
+      );
     }
     final ui = context.watch<UiController>();
     final source = ui.activeSource ?? ui.playerSource;
