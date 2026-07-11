@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../controllers/playback_controller.dart';
 import '../controllers/proxy_controller.dart';
 import '../models/proxy_settings.dart';
+import '../services/proxy_list_service.dart';
 import '../services/proxy_service.dart';
 import '../theme.dart';
 
@@ -38,16 +39,34 @@ class _ProxyDialogState extends State<_ProxyDialog> {
   String? testResult;
   bool testOk = false;
 
+  // Free-proxy-list fetch state.
+  String fetchCountry = ProxyListService.defaultCountry.code;
+  bool fetching = false;
+  String? fetchError;
+  List<FreeProxy> fetchedProxies = const [];
+  FreeProxy? selectedProxy;
+
   @override
   void initState() {
     super.initState();
     final settings = context.read<ProxyController>().settings;
-    enabled = settings.enabled;
+    // Start with the proxy switched off while configuring; it auto-enables
+    // once a proxy is picked (or the user flips it on manually).
+    enabled = false;
     type = settings.type;
     host = TextEditingController(text: settings.host);
     port = TextEditingController(text: '${settings.port}');
     username = TextEditingController(text: settings.username);
     password = TextEditingController(text: settings.password);
+
+    // Restore the last fetched list so reopening the dialog keeps results
+    // until the user fetches again.
+    final cache = ProxyListService.lastFetch;
+    if (cache != null) {
+      fetchCountry = cache.countryCode;
+      fetchedProxies = cache.proxies;
+      selectedProxy = cache.selected;
+    }
   }
 
   @override
@@ -84,6 +103,48 @@ class _ProxyDialogState extends State<_ProxyDialog> {
     });
   }
 
+  Future<void> _fetchProxies() async {
+    setState(() {
+      fetching = true;
+      fetchError = null;
+      fetchedProxies = const [];
+      selectedProxy = null;
+    });
+    try {
+      final proxies = await ProxyListService.fetchAll(
+        countryCode: fetchCountry,
+      );
+      if (!mounted) return;
+      setState(() {
+        fetching = false;
+        fetchedProxies = proxies;
+        if (proxies.isEmpty) {
+          fetchError = 'No proxies found for this country';
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        fetching = false;
+        fetchError = 'Fetch failed: $e';
+      });
+    }
+  }
+
+  void _applyFetched(FreeProxy proxy) {
+    setState(() {
+      selectedProxy = proxy;
+      type = proxy.protocol.proxyType;
+      host.text = proxy.host;
+      port.text = '${proxy.port}';
+      // A freshly picked list proxy is enabled by default for convenience.
+      enabled = true;
+      testResult = null;
+    });
+    // Remember the selection so it's highlighted when the dialog reopens.
+    ProxyListService.lastFetch?.selected = proxy;
+  }
+
   Future<void> _save() async {
     final next = _collect();
     if (next.enabled && !next.isConfigured) {
@@ -109,6 +170,213 @@ class _ProxyDialogState extends State<_ProxyDialog> {
     }
   }
 
+  Widget _buildFetchSection() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceMuted,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Get a free proxy',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontWeight: FontWeight.w600,
+              fontSize: 13.5,
+            ),
+          ),
+          const SizedBox(height: 2),
+          const Text(
+            'Fetch public strict-SSL, elite-anonymity proxies by country with '
+            'reported latency and protocol. Pick one below to auto-fill and '
+            'enable it.',
+            style: TextStyle(color: AppColors.textMuted, fontSize: 11.5),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: fetchCountry,
+                  isDense: true,
+                  isExpanded: true,
+                  style: const TextStyle(
+                    color: AppColors.textPrimary,
+                    fontSize: 13,
+                  ),
+                  decoration: _decoration('Country'),
+                  items: [
+                    for (final c in ProxyListService.countries)
+                      DropdownMenuItem(value: c.code, child: Text(c.label)),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setState(() {
+                      fetchCountry = value;
+                      fetchedProxies = const [];
+                      selectedProxy = null;
+                      fetchError = null;
+                    });
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              FilledButton.icon(
+                onPressed: fetching ? null : _fetchProxies,
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.accent,
+                ),
+                icon: fetching
+                    ? const SizedBox(
+                        width: 15,
+                        height: 15,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            Colors.white,
+                          ),
+                        ),
+                      )
+                    : const Icon(Icons.cloud_download_rounded, size: 17),
+                label: const Text('Fetch'),
+              ),
+            ],
+          ),
+          if (fetchedProxies.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Text(
+              'Pick a proxy (${fetchedProxies.length} found, sorted by latency)',
+              style: const TextStyle(
+                color: AppColors.textSecondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              constraints: const BoxConstraints(maxHeight: 168),
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: fetchedProxies.length,
+                itemBuilder: (context, index) {
+                  final proxy = fetchedProxies[index];
+                  return _proxyRow(proxy);
+                },
+              ),
+            ),
+          ],
+          if (fetchError != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              fetchError!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppColors.danger, fontSize: 12),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _proxyRow(FreeProxy proxy) {
+    final selected = selectedProxy == proxy;
+    return InkWell(
+      onTap: () => _applyFetched(proxy),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        color: selected ? AppColors.accentSoft : Colors.transparent,
+        child: Row(
+          children: [
+            Icon(
+              selected
+                  ? Icons.radio_button_checked_rounded
+                  : Icons.radio_button_unchecked_rounded,
+              size: 16,
+              color: selected ? AppColors.accent : AppColors.textMuted,
+            ),
+            const SizedBox(width: 8),
+            _protocolBadge(proxy.protocol),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                proxy.hostPort,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: AppColors.textPrimary,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            _latencyBadge(proxy.latencyMs),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _protocolBadge(FreeProxyProtocol protocol) {
+    final color = switch (protocol) {
+      FreeProxyProtocol.http => AppColors.accent,
+      FreeProxyProtocol.socks5 => const Color(0xff7b5cf0),
+    };
+    return Container(
+      width: 58,
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        protocol.label,
+        style: TextStyle(
+          color: color,
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _latencyBadge(int? ms) {
+    if (ms == null) {
+      return const Text(
+        'unknown',
+        style: TextStyle(color: AppColors.textMuted, fontSize: 11.5),
+      );
+    }
+    final color = ms < 300
+        ? AppColors.good
+        : (ms < 800 ? const Color(0xffd08700) : AppColors.danger);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        '${ms}ms',
+        style: TextStyle(
+          color: color,
+          fontSize: 11.5,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
   InputDecoration _decoration(String label, {Widget? suffixIcon}) {
     return InputDecoration(
       labelText: label,
@@ -126,12 +394,18 @@ class _ProxyDialogState extends State<_ProxyDialog> {
         'Proxy Settings',
         style: TextStyle(color: AppColors.textPrimary),
       ),
-      content: SizedBox(
-        width: 440,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      content: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 440,
+          maxHeight: MediaQuery.of(context).size.height * 0.82,
+        ),
+        child: SizedBox(
+          width: 440,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
             const Text(
               'Route playlist downloads and streams through an HTTP or '
               'SOCKS5 proxy to watch region-restricted channels.',
@@ -180,6 +454,8 @@ class _ProxyDialogState extends State<_ProxyDialog> {
                 testResult = null;
               }),
             ),
+            const SizedBox(height: 12),
+            _buildFetchSection(),
             const SizedBox(height: 8),
             Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -283,7 +559,9 @@ class _ProxyDialogState extends State<_ProxyDialog> {
               'proxy from the next channel you open.',
               style: TextStyle(color: AppColors.textMuted, fontSize: 12),
             ),
-          ],
+              ],
+            ),
+          ),
         ),
       ),
       actions: [
