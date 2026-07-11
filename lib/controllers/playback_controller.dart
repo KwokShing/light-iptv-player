@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../dash_clearkey.dart';
 import '../models/playlist.dart';
+import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
 
 /// Owns the media_kit player engine and all playback state: the reconnect
@@ -67,6 +68,11 @@ class PlaybackController extends ChangeNotifier {
   // stream that could never connect in the first place (reconnecting forever,
   // and screenshotting a frameless output, is what crashes the process).
   bool _everPlayed = false;
+  // Times how long the current channel took from play() to its first rendered
+  // frame, so the list can show that as a real ping (correcting a stale red
+  // dot) once playback is confirmed. Keyed to the channel's list URL.
+  Stopwatch? _startupStopwatch;
+  String? _startupUrl;
   // Non-null when playback failed before it ever started; shown verbatim in the
   // control bar. 'Load error' for a hard open/demux failure. Cleared on a new
   // open, on stop, and if playback eventually starts.
@@ -363,6 +369,8 @@ class PlaybackController extends ChangeNotifier {
     reconnecting = false;
     _reconnectAttempts = 0;
     _everPlayed = false;
+    _startupStopwatch = Stopwatch()..start();
+    _startupUrl = channel.url;
     _failureLabel = null;
     _lastYtdlHookErrorAt = null;
     _ytdlGraceTimer?.cancel();
@@ -459,6 +467,16 @@ class PlaybackController extends ChangeNotifier {
     _connectTimer = null;
     _ytdlGraceTimer?.cancel();
     _ytdlGraceTimer = null;
+    // First frame reached: turn the elapsed startup time into a real ping so
+    // the channel list replaces any stale "unreachable" red dot with a value.
+    final stopwatch = _startupStopwatch;
+    final url = _startupUrl;
+    if (stopwatch != null && url != null) {
+      stopwatch.stop();
+      PingService.markReachable(url, stopwatch.elapsedMilliseconds);
+      _startupStopwatch = null;
+      _startupUrl = null;
+    }
     final needsRebuild = _failureLabel != null || reconnecting;
     _failureLabel = null;
     if (reconnecting) {

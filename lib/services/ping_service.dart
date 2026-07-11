@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 /// Result of a reachability probe against a channel's stream host.
@@ -66,7 +67,22 @@ class PingService {
   static final Map<String, Future<PingResult>> _inFlight =
       <String, Future<PingResult>>{};
 
+  /// Bumped whenever a cached result changes so widgets showing a URL's ping
+  /// (e.g. ChannelPing) can refresh — notably when [markReachable] corrects a
+  /// stale "unreachable" after the stream actually played.
+  static final ValueNotifier<int> revision = ValueNotifier<int>(0);
+
   static PingResult? cached(String url) => _cache[url];
+
+  /// Records that [url] is reachable with [ms] latency, overriding any cached
+  /// (possibly stale "unreachable") result. Called when a channel actually
+  /// starts playing, so the list shows a real ping instead of a red dot.
+  static void markReachable(String url, int ms) {
+    final existing = _cache[url];
+    if (existing != null && existing.reachable && existing.ms == ms) return;
+    _cache[url] = PingResult.reachable(ms);
+    revision.value++;
+  }
 
   static Future<PingResult> ping(String url) {
     final existing = _cache[url];

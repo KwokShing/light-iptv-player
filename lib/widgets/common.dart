@@ -325,6 +325,7 @@ class _ChannelPingState extends State<ChannelPing> {
   void initState() {
     super.initState();
     _result = PingService.cached(widget.url);
+    PingService.revision.addListener(_onRevision);
     _maybePing();
   }
 
@@ -338,6 +339,20 @@ class _ChannelPingState extends State<ChannelPing> {
       _requested = false;
     }
     _maybePing();
+  }
+
+  @override
+  void dispose() {
+    PingService.revision.removeListener(_onRevision);
+    super.dispose();
+  }
+
+  // Another part of the app updated a cached result (e.g. playback confirmed
+  // this stream reachable). Pick up our URL's latest value if it changed.
+  void _onRevision() {
+    final latest = PingService.cached(widget.url);
+    if (!mounted || latest == _result) return;
+    setState(() => _result = latest);
   }
 
   void _maybePing() {
