@@ -1,6 +1,5 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 
 import '../controllers/playback_controller.dart';
@@ -80,17 +79,7 @@ class SourcesPage extends StatelessWidget {
     );
     if (values == null) return;
     try {
-      final response = await http.get(Uri.parse(values.source));
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        if (context.mounted) {
-          _showMessage(
-            context,
-            'Failed to load playlist: HTTP ${response.statusCode}',
-          );
-        }
-        return;
-      }
-      final text = await decodeHttpPlaylist(response);
+      final text = await fetchPlaylistText(values.source);
       await sources.upsert(
         PlaylistSource(
           id: newSourceId(),
@@ -155,17 +144,7 @@ class SourcesPage extends StatelessWidget {
           );
         } else if (updatedSource.kind == SourceKind.online) {
           try {
-            final response = await http.get(Uri.parse(url));
-            if (response.statusCode < 200 || response.statusCode >= 300) {
-              if (context.mounted) {
-                _showMessage(
-                  context,
-                  'Failed to load playlist: HTTP ${response.statusCode}',
-                );
-              }
-              return;
-            }
-            final text = await decodeHttpPlaylist(response);
+            final text = await fetchPlaylistText(url);
             await sources.replace(
               updatedSource.copyWith(
                 source: url,

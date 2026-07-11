@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../constants.dart';
@@ -81,11 +80,7 @@ class SourcesController extends ChangeNotifier {
       );
       return compute(parsePlaylist, text);
     }
-    final response = await http.get(Uri.parse(source.source));
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw Exception('HTTP ${response.statusCode}');
-    }
-    final text = await decodeHttpPlaylist(response);
+    final text = await fetchPlaylistText(source.source);
     return compute(parsePlaylist, text);
   }
 

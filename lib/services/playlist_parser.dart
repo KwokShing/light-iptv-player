@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -110,6 +111,35 @@ String? _attrFromExtInf(String line, String name) {
 }
 
 String newSourceId() => DateTime.now().microsecondsSinceEpoch.toString();
+
+/// Playlist download failure with a clean, user-facing message (no
+/// "Exception:" prefix when interpolated into status text).
+class PlaylistFetchException implements Exception {
+  const PlaylistFetchException(this.message);
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
+/// Fetches and decodes an online playlist with a hard timeout, so a stalled
+/// connection (dead server, bad proxy, flaky network) fails visibly instead
+/// of leaving refresh spinners running forever.
+Future<String> fetchPlaylistText(
+  String url, {
+  Duration timeout = const Duration(seconds: 20),
+}) async {
+  final http.Response response;
+  try {
+    response = await http.get(Uri.parse(url)).timeout(timeout);
+  } on TimeoutException {
+    throw const PlaylistFetchException('Connection timed out');
+  }
+  if (response.statusCode < 200 || response.statusCode >= 300) {
+    throw PlaylistFetchException('HTTP ${response.statusCode}');
+  }
+  return decodeHttpPlaylist(response);
+}
 
 Future<String> decodeHttpPlaylist(http.Response response) async {
   final contentType = response.headers['content-type'] ?? '';
