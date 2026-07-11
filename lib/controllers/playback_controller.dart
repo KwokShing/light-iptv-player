@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../dash_clearkey.dart';
 import '../models/playlist.dart';
+import '../services/proxy_service.dart';
 
 /// Owns the media_kit player engine and all playback state: the reconnect
 /// state machine, ytdl grace handling, freeze-frame overlay, mpv option
@@ -728,6 +729,11 @@ class PlaybackController extends ChangeNotifier {
       // it grows toward tens of MiB the entire time a stream plays. Live IPTV
       // can never seek backward, so that buffer is pure wasted RAM. Cap it hard.
       'demuxer-max-back-bytes': (4 * 1024 * 1024).toString(),
+      // Region proxy for the stream itself. Local ClearKey-proxy streams stay
+      // DIRECT here (their origin requests are proxied inside dash_clearkey
+      // via HttpOverrides instead). An empty value clears any proxy left over
+      // from a previously played channel.
+      'http-proxy': _proxyForActiveStream(),
     };
 
     for (final option in options.entries) {
@@ -744,6 +750,22 @@ class PlaybackController extends ChangeNotifier {
           await (platform as dynamic).getProperty('hwdec-current') as String?;
       debugPrint('After apply: hwdec-current=$current');
     } catch (_) {}
+  }
+
+  /// mpv `http-proxy` value for the stream about to be opened: the configured
+  /// proxy URL (the user's HTTP proxy, or the local SOCKS bridge) when the
+  /// proxy is active and the stream is remote, otherwise empty (which clears
+  /// the property).
+  String _proxyForActiveStream() {
+    final proxyUrl = ProxyService.mpvProxyUrl();
+    if (proxyUrl == null) return '';
+    final uri = Uri.tryParse(_activeStreamUrl);
+    if (uri == null ||
+        !(uri.isScheme('http') || uri.isScheme('https')) ||
+        isLoopbackHost(uri.host)) {
+      return '';
+    }
+    return proxyUrl;
   }
 
   // Motion interpolation (frame doubling) only helps low-frame-rate sources

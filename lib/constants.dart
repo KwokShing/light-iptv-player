@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 const sourcesStorageKey = 'light-iptv-player:sources:flutter:v1';
 const installedTagStorageKey = 'light-iptv-player:installed-tag:v1';
+const proxyStorageKey = 'light-iptv-player:proxy:v1';
 const allChannels = 'All Channels';
 const ungroupedGroup = 'Ungrouped';
 

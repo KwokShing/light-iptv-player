@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -6,11 +7,13 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'controllers/playback_controller.dart';
+import 'controllers/proxy_controller.dart';
 import 'controllers/sources_controller.dart';
 import 'controllers/ui_controller.dart';
 import 'controllers/update_controller.dart';
 import 'pages/player_page.dart';
 import 'pages/sources_page.dart';
+import 'services/proxy_service.dart';
 import 'theme.dart';
 
 // Re-exported so existing imports (e.g. tests) that reference these from
@@ -26,6 +29,12 @@ Future<void> main() async {
   // list doesn't re-download and re-decode images it already showed.
   PaintingBinding.instance.imageCache.maximumSize = 2000;
   PaintingBinding.instance.imageCache.maximumSizeBytes = 128 * 1024 * 1024;
+  // Install the proxy-aware HttpOverrides and load persisted proxy settings
+  // BEFORE anything can issue a network request (controllers start fetching
+  // as soon as the widget tree builds).
+  HttpOverrides.global = ProxyHttpOverrides();
+  final proxyController = ProxyController();
+  await proxyController.load();
   MediaKit.ensureInitialized();
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
@@ -42,7 +51,7 @@ Future<void> main() async {
       await windowManager.focus();
     },
   );
-  runApp(const IptvApp());
+  runApp(IptvApp(proxyController: proxyController));
 }
 
 void _filterNoisyDebugLogs() {
@@ -59,12 +68,15 @@ void _filterNoisyDebugLogs() {
 }
 
 class IptvApp extends StatelessWidget {
-  const IptvApp({super.key});
+  const IptvApp({super.key, required this.proxyController});
+
+  final ProxyController proxyController;
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
+        ChangeNotifierProvider.value(value: proxyController),
         ChangeNotifierProvider(create: (_) => SourcesController()..load()),
         ChangeNotifierProvider(create: (_) => PlaybackController()),
         ChangeNotifierProvider(create: (_) => UpdateController()..checkForUpdate()),
