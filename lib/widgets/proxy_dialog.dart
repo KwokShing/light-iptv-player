@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../controllers/playback_controller.dart';
 import '../controllers/proxy_controller.dart';
 import '../models/proxy_settings.dart';
 import '../services/proxy_service.dart';
@@ -92,8 +93,20 @@ class _ProxyDialogState extends State<_ProxyDialog> {
       });
       return;
     }
-    await context.read<ProxyController>().save(next);
+    final proxy = context.read<ProxyController>();
+    final playback = context.read<PlaybackController>();
+    final previous = proxy.settings;
+    await proxy.save(next);
     if (mounted) Navigator.pop(context);
+    // Reconnect the playing channel when the change affects routing, so the
+    // new proxy applies without the user having to reopen the channel.
+    final routingChanged =
+        previous.active != next.active ||
+        (next.active && !previous.sameEndpoint(next));
+    final playing = playback.nowPlaying;
+    if (routingChanged && playing != null) {
+      await playback.play(playing);
+    }
   }
 
   InputDecoration _decoration(String label, {Widget? suffixIcon}) {

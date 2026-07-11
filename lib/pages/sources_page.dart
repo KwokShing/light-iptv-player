@@ -4,14 +4,13 @@ import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 
 import '../controllers/playback_controller.dart';
-import '../controllers/proxy_controller.dart';
 import '../controllers/sources_controller.dart';
 import '../controllers/ui_controller.dart';
 import '../controllers/update_controller.dart';
 import '../models/playlist.dart';
 import '../services/playlist_parser.dart';
 import '../theme.dart';
-import '../widgets/proxy_dialog.dart';
+import '../widgets/proxy_button.dart';
 import '../widgets/source_widgets.dart';
 import '../widgets/top_bar.dart';
 
@@ -212,7 +211,6 @@ class SourcesPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final sources = context.watch<SourcesController>();
     final update = context.watch<UpdateController>();
-    final proxy = context.watch<ProxyController>();
     return Scaffold(
       backgroundColor: AppColors.bg,
       body: Column(
@@ -235,13 +233,7 @@ class SourcesPage extends StatelessWidget {
                 onPressed: sources.refreshingAll ? null : sources.refreshAll,
               ),
               const SizedBox(width: 10),
-              TopBarButton(
-                icon: proxy.settings.active
-                    ? Icons.vpn_lock_rounded
-                    : Icons.public_rounded,
-                label: proxy.settings.active ? 'Proxy On' : 'Proxy',
-                onPressed: () => showProxyDialog(context),
-              ),
+              const ProxyButton(),
             ],
           ),
           if (update.availableUpdate != null) ...[

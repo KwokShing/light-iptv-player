@@ -9,6 +9,7 @@ import '../models/playlist.dart';
 import '../theme.dart';
 import '../widgets/channel_list.dart';
 import '../widgets/playback_controls.dart';
+import '../widgets/proxy_button.dart';
 import '../widgets/top_bar.dart';
 
 class PlayerPage extends StatefulWidget {
@@ -85,6 +86,7 @@ class _PlayerPageState extends State<PlayerPage> {
                       onChanged: ui.setSearch,
                       hint: 'Search channels',
                     ),
+                    trailing: const [ProxyButton()],
                   ),
                 Expanded(
                   child: Row(
