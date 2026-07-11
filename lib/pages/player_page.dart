@@ -234,6 +234,12 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   playback.nowPlaying == null
                                                   ? null
                                                   : playback.takeSnapshot,
+                                              deinterlace:
+                                                  playback.deinterlace,
+                                              onDeinterlace:
+                                                  playback.nowPlaying == null
+                                                  ? null
+                                                  : playback.toggleDeinterlace,
                                               onExitFullscreen:
                                                   playback.toggleFullscreen,
                                             ),
@@ -261,6 +267,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                       ? null
                                       : playback.onSeekEnd,
                                   hwActive: playback.hwActive,
+                                  deinterlace: playback.deinterlace,
                                   onReplay: playback.nowPlaying == null
                                       ? null
                                       : () =>
@@ -280,6 +287,9 @@ class _PlayerPageState extends State<PlayerPage> {
                                   onSnapshot: playback.nowPlaying == null
                                       ? null
                                       : playback.takeSnapshot,
+                                  onDeinterlace: playback.nowPlaying == null
+                                      ? null
+                                      : playback.toggleDeinterlace,
                                   onFullscreen: playback.toggleFullscreen,
                                 ),
                             ],

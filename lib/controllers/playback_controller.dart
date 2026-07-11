@@ -87,6 +87,10 @@ class PlaybackController extends ChangeNotifier {
   double? containerFps;
   String? hwdecCurrent;
   bool _interpolationConfigured = false;
+  // Per-channel deinterlace toggle. Starts OFF for every stream and is reset
+  // to OFF on each channel switch (see play()); the user turns it on manually
+  // when a given channel shows combing.
+  bool deinterlace = false;
 
   bool fullscreen = false;
   bool fullscreenChanging = false;
@@ -375,6 +379,10 @@ class PlaybackController extends ChangeNotifier {
     _lastYtdlHookErrorAt = null;
     _ytdlGraceTimer?.cancel();
     _ytdlGraceTimer = null;
+    // Deinterlace is a per-channel, opt-in toggle: reset it OFF on every
+    // channel switch so a new stream always starts un-deinterlaced. The mpv
+    // `vf` filter is cleared alongside it in _applyPlaybackOptions.
+    deinterlace = false;
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
@@ -736,6 +744,9 @@ class PlaybackController extends ChangeNotifier {
       'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
+      // Deinterlacing is handled via an explicit video filter (see
+      // _applyDeinterlaceFilter), applied after the option loop so the filter
+      // string can be swapped live without a reload. Nothing to set here.
       // Keep the last decoded frame on EOF so a fast `loadfile replace` at a
       // segment boundary does not flash black while the next connection opens.
       'keep-open': 'yes',
@@ -768,6 +779,8 @@ class PlaybackController extends ChangeNotifier {
           await (platform as dynamic).getProperty('hwdec-current') as String?;
       debugPrint('After apply: hwdec-current=$current');
     } catch (_) {}
+
+    await _applyDeinterlaceFilter();
   }
 
   /// mpv `http-proxy` value for the stream about to be opened: the configured
@@ -809,6 +822,41 @@ class PlaybackController extends ChangeNotifier {
       );
     } catch (e) {
       debugPrint('Failed to apply interpolation: $e');
+    }
+  }
+
+  /// Flip the per-channel deinterlace toggle and apply it live to the running
+  /// stream so the change is visible immediately (no reload needed). Not
+  /// persisted: it resets to OFF on the next channel switch (see play()).
+  Future<void> toggleDeinterlace() async {
+    deinterlace = !deinterlace;
+    notifyListeners();
+    await _applyDeinterlaceFilter();
+  }
+
+  // Apply (or clear) the deinterlacer. mpv's default `deinterlace=yes` runs
+  // yadif in `send_field` mode, which doubles the output frame rate (50i -> 50p)
+  // — that frame doubling, on top of the `auto-copy` hwdec path that already
+  // copies frames back to system RAM, is what makes playback stutter like a
+  // slideshow. Instead use the faster `bwdif` filter in `send_frame` mode so
+  // one deinterlaced frame is produced per input field pair (output fps stays
+  // the same). This keeps the CPU cost low while still removing combing.
+  //
+  // Set via the `vf` PROPERTY (not the `vf set` command): the property persists
+  // across `loadfile`/`open`, so once enabled the filter is re-applied
+  // automatically to every channel we switch to, instead of only the stream
+  // that was playing when the toggle was pressed.
+  Future<void> _applyDeinterlaceFilter() async {
+    final platform = player.platform;
+    if (platform == null) return;
+    try {
+      await (platform as dynamic).setProperty(
+        'vf',
+        deinterlace ? 'bwdif=mode=send_frame:deint=all' : '',
+      );
+      debugPrint('Deinterlace ${deinterlace ? 'enabled (bwdif)' : 'disabled'}');
+    } catch (e) {
+      debugPrint('Failed to apply deinterlace filter: $e');
     }
   }
 
@@ -902,6 +950,10 @@ class PlaybackController extends ChangeNotifier {
     }
     if (key == LogicalKeyboardKey.keyM) {
       toggleMute();
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.keyD) {
+      toggleDeinterlace();
       return KeyEventResult.handled;
     }
     if (key == LogicalKeyboardKey.keyF) {

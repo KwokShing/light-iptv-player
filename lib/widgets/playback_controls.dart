@@ -18,12 +18,14 @@ class PlaybackControls extends StatelessWidget {
     required this.onSeekChanged,
     required this.onSeekEnd,
     required this.hwActive,
+    required this.deinterlace,
     required this.onReplay,
     required this.onPlayPause,
     required this.onStop,
     required this.onMute,
     required this.onVolume,
     required this.onSnapshot,
+    required this.onDeinterlace,
     required this.onFullscreen,
   });
 
@@ -38,12 +40,14 @@ class PlaybackControls extends StatelessWidget {
   final ValueChanged<double>? onSeekChanged;
   final ValueChanged<double>? onSeekEnd;
   final bool hwActive;
+  final bool deinterlace;
   final VoidCallback? onReplay;
   final VoidCallback? onPlayPause;
   final VoidCallback? onStop;
   final VoidCallback? onMute;
   final ValueChanged<double>? onVolume;
   final VoidCallback? onSnapshot;
+  final VoidCallback? onDeinterlace;
   final VoidCallback? onFullscreen;
 
   @override
@@ -179,8 +183,8 @@ class PlaybackControls extends StatelessWidget {
                       ),
                     ),
                   ),
-                  const Spacer(),
-                  Flexible(
+                  const SizedBox(width: 12),
+                  Expanded(
                     child: Text(
                       playbackInfo,
                       textAlign: TextAlign.end,
@@ -193,43 +197,12 @@ class PlaybackControls extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 4,
-                    ),
-                    decoration: BoxDecoration(
-                      color: hwActive
-                          ? AppColors.accentSoft
-                          : AppColors.surfaceMuted,
-                      borderRadius: BorderRadius.circular(6),
-                      border: Border.all(
-                        color: hwActive
-                            ? AppColors.accentBorder
-                            : AppColors.border,
-                      ),
-                    ),
-                    child: Text(
-                      hwActive ? 'HW' : 'SW',
-                      style: TextStyle(
-                        color: hwActive
-                            ? AppColors.accent
-                            : AppColors.textMuted,
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                  TransportButton(
-                    icon: Icons.photo_camera_outlined,
-                    tooltip: 'Snapshot',
-                    onPressed: onSnapshot,
-                  ),
-                  TransportButton(
-                    icon: Icons.fullscreen_rounded,
-                    tooltip: 'Fullscreen (F / double-click)',
-                    onPressed: onFullscreen,
+                  _RightControls(
+                    hwActive: hwActive,
+                    deinterlace: deinterlace,
+                    onDeinterlace: onDeinterlace,
+                    onSnapshot: onSnapshot,
+                    onFullscreen: onFullscreen,
                   ),
                 ],
               ),
@@ -257,6 +230,8 @@ class FullscreenControls extends StatelessWidget {
     required this.onStop,
     required this.onMute,
     required this.onSnapshot,
+    required this.deinterlace,
+    required this.onDeinterlace,
     required this.onExitFullscreen,
   });
 
@@ -272,6 +247,8 @@ class FullscreenControls extends StatelessWidget {
   final VoidCallback? onStop;
   final VoidCallback? onMute;
   final VoidCallback? onSnapshot;
+  final bool deinterlace;
+  final VoidCallback? onDeinterlace;
   final VoidCallback? onExitFullscreen;
 
   @override
@@ -336,6 +313,14 @@ class FullscreenControls extends StatelessWidget {
                       ),
                     ),
                     TransportButton(
+                      icon: Icons.deblur_rounded,
+                      tooltip: deinterlace
+                          ? 'Deinterlace: On (D)'
+                          : 'Deinterlace: Off (D)',
+                      onPressed: onDeinterlace,
+                      color: deinterlace ? AppColors.accent : Colors.white,
+                    ),
+                    TransportButton(
                       icon: Icons.photo_camera_outlined,
                       tooltip: 'Snapshot',
                       onPressed: onSnapshot,
@@ -354,6 +339,71 @@ class FullscreenControls extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// The status/action cluster pinned to the right edge of the transport bar:
+/// the HW/SW decode badge followed by the deinterlace, snapshot and fullscreen
+/// buttons. Grouped so it keeps a stable position regardless of how long the
+/// adjacent playback-info text is.
+class _RightControls extends StatelessWidget {
+  const _RightControls({
+    required this.hwActive,
+    required this.deinterlace,
+    required this.onDeinterlace,
+    required this.onSnapshot,
+    required this.onFullscreen,
+  });
+
+  final bool hwActive;
+  final bool deinterlace;
+  final VoidCallback? onDeinterlace;
+  final VoidCallback? onSnapshot;
+  final VoidCallback? onFullscreen;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            color: hwActive ? AppColors.accentSoft : AppColors.surfaceMuted,
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(
+              color: hwActive ? AppColors.accentBorder : AppColors.border,
+            ),
+          ),
+          child: Text(
+            hwActive ? 'HW' : 'SW',
+            style: TextStyle(
+              color: hwActive ? AppColors.accent : AppColors.textMuted,
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(width: 4),
+        TransportButton(
+          icon: Icons.deblur_rounded,
+          tooltip:
+              deinterlace ? 'Deinterlace: On (D)' : 'Deinterlace: Off (D)',
+          onPressed: onDeinterlace,
+          color: deinterlace ? AppColors.accent : null,
+        ),
+        TransportButton(
+          icon: Icons.photo_camera_outlined,
+          tooltip: 'Snapshot',
+          onPressed: onSnapshot,
+        ),
+        TransportButton(
+          icon: Icons.fullscreen_rounded,
+          tooltip: 'Fullscreen (F / double-click)',
+          onPressed: onFullscreen,
+        ),
+      ],
     );
   }
 }
