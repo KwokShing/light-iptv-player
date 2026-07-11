@@ -29,8 +29,13 @@ class PlaybackController extends ChangeNotifier {
     _listenPlaybackInfo();
   }
 
-  late final Player player;
-  late final VideoController videoController;
+  late Player player;
+  late VideoController videoController;
+  // Bumped every time the engine is recreated. The player page keys its `Video`
+  // widget with this so a fresh Video State binds to the new VideoController
+  // (media_kit's Video does not rebind a swapped controller in didUpdateWidget).
+  int _engineGeneration = 0;
+  int get engineGeneration => _engineGeneration;
 
   // Local decrypting proxy for ClearKey-protected MPEG-DASH. When active, mpv
   // is pointed at its rewritten local manifest instead of the origin URL.
@@ -122,14 +127,7 @@ class PlaybackController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _videoParamsSubscription?.cancel();
-    _trackSubscription?.cancel();
-    _completedSubscription?.cancel();
-    _playingSubscription?.cancel();
-    _positionSubscription?.cancel();
-    _durationSubscription?.cancel();
-    _errorSubscription?.cancel();
-    _logSubscription?.cancel();
+    _cancelStreamSubscriptions();
     _bitrateTimer?.cancel();
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
@@ -141,6 +139,38 @@ class PlaybackController extends ChangeNotifier {
     player.dispose();
     _messages.close();
     super.dispose();
+  }
+
+  void _cancelStreamSubscriptions() {
+    _videoParamsSubscription?.cancel();
+    _trackSubscription?.cancel();
+    _completedSubscription?.cancel();
+    _playingSubscription?.cancel();
+    _positionSubscription?.cancel();
+    _durationSubscription?.cancel();
+    _errorSubscription?.cancel();
+    _logSubscription?.cancel();
+  }
+
+  /// Tears down the current mpv engine and builds a fresh one. Disposing the
+  /// [Player] frees its native render context and unregisters the Flutter
+  /// texture (see media_kit's `~VideoOutput`), which is the only reliable way to
+  /// drop the last decoded frame the texture retains by design. A new engine
+  /// starts with a blank texture, so switching channels no longer flashes the
+  /// previous channel's final frame. The player page rebinds via
+  /// [engineGeneration].
+  Future<void> _recreateEngine() async {
+    _cancelStreamSubscriptions();
+    final old = player;
+    final engine = _createPlaybackEngine();
+    player = engine.$1;
+    videoController = engine.$2;
+    _engineGeneration++;
+    _listenPlaybackInfo();
+    notifyListeners();
+    // Dispose the old engine after the swap so the UI can bind the new texture
+    // first; the black gap between the two is what replaces the stale frame.
+    unawaited(old.dispose().catchError((_) {}));
   }
 
   (Player, VideoController) _createPlaybackEngine() {
@@ -239,7 +269,9 @@ class PlaybackController extends ChangeNotifier {
         notifyListeners();
       }
     });
-    _bitrateTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+    // Created once and reused across engine recreations: it reads `player`
+    // lazily each tick via _pollBitrate, so it always polls the current engine.
+    _bitrateTimer ??= Timer.periodic(const Duration(seconds: 1), (_) {
       _pollBitrate();
     });
     _positionSubscription = player.stream.position.listen((value) {
@@ -368,6 +400,11 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play(Channel channel) async {
     final request = ++playbackRequest;
+    // A previously-selected channel means the engine has (or will have) painted
+    // a frame that its texture would otherwise retain across the switch. In that
+    // case rebuild the engine so the stale frame is truly released; on the very
+    // first play the freshly-constructed engine is still blank, so reuse it.
+    final needsEngineSwap = nowPlaying != null;
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
     reconnecting = false;
@@ -398,7 +435,11 @@ class PlaybackController extends ChangeNotifier {
     duration = Duration.zero;
     _seeking = false;
     notifyListeners();
-    await player.stop();
+    if (needsEngineSwap) {
+      await _recreateEngine();
+    } else {
+      await player.stop();
+    }
     if (_disposed || request != playbackRequest) return;
 
     // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the

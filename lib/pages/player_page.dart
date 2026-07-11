@@ -152,6 +152,9 @@ class _PlayerPageState extends State<PlayerPage> {
                                         children: [
                                           const ColoredBox(color: Colors.black),
                                           Video(
+                                            key: ValueKey(
+                                              playback.engineGeneration,
+                                            ),
                                             controller:
                                                 playback.videoController,
                                             fit: BoxFit.contain,
