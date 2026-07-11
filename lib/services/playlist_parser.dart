@@ -13,6 +13,7 @@ List<Channel> parsePlaylist(String text) {
       .convert(text)
       .map((line) => line.trim())
       .toList();
+  if (_looksLikeTxtPlaylist(lines)) return _parseTxtPlaylist(lines);
   final channels = <Channel>[];
   var pendingName = '';
   var pendingGroup = ungroupedGroup;
@@ -81,6 +82,81 @@ List<Channel> parsePlaylist(String text) {
         ),
       );
       resetPending();
+    }
+  }
+  return channels;
+}
+
+/// Detects the "txt" playlist format common in Chinese IPTV lists (diyp/TVBox
+/// style): `分组,#genre#` starts a group and each channel is `name,url`, with
+/// an optional `$线路名` label after the URL. Anything with EXTM3U/EXTINF
+/// markers is treated as M3U instead.
+bool _looksLikeTxtPlaylist(List<String> lines) {
+  var txtLines = 0;
+  for (final line in lines) {
+    if (line.isEmpty) continue;
+    if (line.startsWith('#EXT')) return false;
+    if (_isGenreLine(line)) return true;
+    if (_splitTxtLine(line) != null && ++txtLines >= 2) return true;
+  }
+  return false;
+}
+
+bool _isGenreLine(String line) {
+  final comma = line.indexOf(',');
+  return comma > 0 && line.substring(comma + 1).trim() == '#genre#';
+}
+
+/// Splits a `name,url` txt line, returning null when the line isn't one.
+(String, String)? _splitTxtLine(String line) {
+  final comma = line.indexOf(',');
+  if (comma <= 0) return null;
+  final name = line.substring(0, comma).trim();
+  final url = line.substring(comma + 1).trim();
+  if (name.isEmpty || !_looksLikeStreamUrl(url)) return null;
+  return (name, url);
+}
+
+bool _looksLikeStreamUrl(String value) {
+  final lower = value.toLowerCase();
+  return lower.startsWith('http://') ||
+      lower.startsWith('https://') ||
+      lower.startsWith('rtsp://') ||
+      lower.startsWith('rtmp://') ||
+      lower.startsWith('rtp://') ||
+      lower.startsWith('udp://');
+}
+
+List<Channel> _parseTxtPlaylist(List<String> lines) {
+  final channels = <Channel>[];
+  var group = ungroupedGroup;
+  for (final line in lines) {
+    if (line.isEmpty) continue;
+    if (_isGenreLine(line)) {
+      final name = line.substring(0, line.indexOf(',')).trim();
+      group = name.isEmpty ? ungroupedGroup : name;
+      continue;
+    }
+    final parts = _splitTxtLine(line);
+    if (parts == null) continue;
+    final (name, rawUrl) = parts;
+    // A `$label` suffix names the line/carrier (e.g. `...$安徽电信`). It is
+    // not part of the URL — strip it, and use it to tell same-named channels
+    // apart. Some lists also join several URLs with `#`; keep each as its own
+    // channel entry.
+    for (final candidate in rawUrl.split('#')) {
+      final dollar = candidate.indexOf(r'$');
+      final url = (dollar < 0 ? candidate : candidate.substring(0, dollar))
+          .trim();
+      if (!_looksLikeStreamUrl(url)) continue;
+      final label = dollar < 0 ? '' : candidate.substring(dollar + 1).trim();
+      channels.add(
+        Channel(
+          name: label.isEmpty ? name : '$name ($label)',
+          url: url,
+          group: group,
+        ),
+      );
     }
   }
   return channels;
