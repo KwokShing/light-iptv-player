@@ -149,11 +149,6 @@ class ChannelList extends StatefulWidget {
 }
 
 class _ChannelListState extends State<ChannelList> {
-  // Names that appear on more than one channel get a "routes" tag. Computed
-  // once whenever the channel list changes instead of rescanning inside every
-  // visible tile (which made large playlists freeze while scrolling).
-  late Set<String> _duplicateNames;
-
   // Logos are remote images. Loading them for every tile that flies past
   // during a fast scroll spawns a storm of HTTP requests + decodes. So we only
   // load logos once scrolling has settled.
@@ -161,34 +156,9 @@ class _ChannelListState extends State<ChannelList> {
   Timer? _scrollIdleTimer;
 
   @override
-  void initState() {
-    super.initState();
-    _computeDuplicateNames();
-  }
-
-  @override
-  void didUpdateWidget(ChannelList oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.channels, widget.channels)) {
-      _computeDuplicateNames();
-    }
-  }
-
-  @override
   void dispose() {
     _scrollIdleTimer?.cancel();
     super.dispose();
-  }
-
-  void _computeDuplicateNames() {
-    final seen = <String>{};
-    final duplicates = <String>{};
-    for (final channel in widget.channels) {
-      if (!seen.add(channel.name)) {
-        duplicates.add(channel.name);
-      }
-    }
-    _duplicateNames = duplicates;
   }
 
   bool _onScroll(ScrollNotification notification) {
@@ -253,7 +223,6 @@ class _ChannelListState extends State<ChannelList> {
                   return _ChannelTile(
                     channel: channel,
                     selected: selectedChannel,
-                    hasRoutes: _duplicateNames.contains(channel.name),
                     loadLogo: !_scrolling,
                     measurePing: !_scrolling,
                     showGroup: widget.showGroup,
@@ -273,7 +242,6 @@ class _ChannelTile extends StatelessWidget {
   const _ChannelTile({
     required this.channel,
     required this.selected,
-    required this.hasRoutes,
     required this.loadLogo,
     required this.measurePing,
     required this.onTap,
@@ -282,7 +250,6 @@ class _ChannelTile extends StatelessWidget {
 
   final Channel channel;
   final bool selected;
-  final bool hasRoutes;
   final bool loadLogo;
   final bool measurePing;
   final bool showGroup;
@@ -339,10 +306,6 @@ class _ChannelTile extends StatelessWidget {
                             ),
                           ),
                         ),
-                        if (hasRoutes) ...const [
-                          SizedBox(width: 8),
-                          Tag(label: 'routes'),
-                        ],
                       ],
                     ),
                     if (showGroup) ...[
