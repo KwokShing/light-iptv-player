@@ -53,12 +53,36 @@ class DashManifestParser {
   /// Parses [xmlText], resolving relative URLs against [baseUri] (the final URL
   /// the MPD was fetched from).
   DashManifest parse(String baseUri, String xmlText) {
-    final doc = XmlDocument.parse(xmlText);
+    final doc = XmlDocument.parse(_sanitize(xmlText));
     final root = doc.rootElement;
     if (root.name.local != 'MPD') {
       throw FormatException('Document root is not an MPD element');
     }
     return _parseMediaPresentationDescription(root, baseUri);
+  }
+
+  // Some CDNs prepend a UTF-8 BOM or stray whitespace/newlines before the XML
+  // declaration, and a few append trailing bytes after </MPD>. Either makes
+  // `XmlDocument.parse` reject the document ("Expected a single root element").
+  // Strip the BOM and, if a root <MPD> element is present, slice out exactly
+  // that element so extraneous surrounding content can't break parsing.
+  static String _sanitize(String xmlText) {
+    var text = xmlText;
+    if (text.isNotEmpty && text.codeUnitAt(0) == 0xFEFF) {
+      text = text.substring(1); // strip BOM
+    }
+    text = text.trimLeft();
+
+    final start = text.indexOf('<MPD');
+    if (start < 0) return text;
+    final endTag = text.lastIndexOf('</MPD>');
+    if (endTag >= start) {
+      return text.substring(start, endTag + '</MPD>'.length);
+    }
+    // Self-closing or malformed close: fall back to everything from <MPD on,
+    // keeping any XML declaration only if it precedes <MPD (dropped here since
+    // xml can parse a bare element too).
+    return text.substring(start);
   }
 
   // ---------------------------------------------------------------------------

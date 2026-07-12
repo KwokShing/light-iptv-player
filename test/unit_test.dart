@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:light_iptv_player/constants.dart';
 import 'package:light_iptv_player/controllers/sources_controller.dart';
+import 'package:light_iptv_player/dash/dash_manifest_parser.dart';
 import 'package:light_iptv_player/models/playlist.dart';
 import 'package:light_iptv_player/services/playlist_parser.dart';
 import 'package:light_iptv_player/update_service.dart';
@@ -151,6 +152,43 @@ https://example.com/drm.mpd
       await controller.refreshAll();
       expect(await message, 'No playlists to refresh');
       expect(controller.refreshingAll, isFalse);
+    });
+  });
+
+  group('DashManifestParser', () {
+    const mpd = '<?xml version="1.0"?>'
+        '<MPD type="static" mediaPresentationDuration="PT10S" minBufferTime="PT2S">'
+        '<Period>'
+        '<AdaptationSet contentType="video" mimeType="video/mp4">'
+        '<Representation id="v0" bandwidth="500000" codecs="avc1.4d401f">'
+        '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+        'initialization="init_\$RepresentationID\$.mp4" '
+        'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+        '</Representation>'
+        '</AdaptationSet>'
+        '</Period>'
+        '</MPD>';
+
+    test('parses a minimal MPD into a manifest tree', () {
+      final manifest =
+          const DashManifestParser().parse('https://cdn.test/x.mpd', mpd);
+      expect(manifest.periodCount, 1);
+      final as_ = manifest.getPeriod(0).adaptationSets.single;
+      expect(as_.representations.single.format.id, 'v0');
+    });
+
+    test('tolerates a leading BOM and surrounding whitespace', () {
+      final withJunk = '\uFEFF\n   $mpd\n\n';
+      final manifest =
+          const DashManifestParser().parse('https://cdn.test/x.mpd', withJunk);
+      expect(manifest.periodCount, 1);
+    });
+
+    test('tolerates trailing content after the closing MPD tag', () {
+      final withTrailer = '$mpd<!-- edge cache footer -->trailing junk';
+      final manifest = const DashManifestParser()
+          .parse('https://cdn.test/x.mpd', withTrailer);
+      expect(manifest.periodCount, 1);
     });
   });
 }
