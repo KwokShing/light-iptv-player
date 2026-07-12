@@ -614,25 +614,41 @@ class DashStreamServer {
     }
   }
 
-  // Fetches and parses the manifest. When [fromOrigin] is true, re-resolves
-  // from the original entry URL (e.g. a `…php?id=` endpoint that 302s to a
-  // fresh CDN .mpd) instead of re-hitting the pinned .mpd. The pinned .mpd is
-  // often a one-shot snapshot whose SegmentTimeline never grows, so at the live
-  // edge we must go back to the origin to obtain newer segments — effectively
-  // reloading the stream the way a channel switch would.
+  // Fetches and parses the manifest, retrying transient failures. When
+  // [fromOrigin] is true, re-resolves from the original entry URL (e.g. a
+  // `…php?id=` endpoint that 302s to a fresh CDN .mpd) instead of re-hitting the
+  // pinned .mpd. The pinned .mpd is often a one-shot snapshot whose
+  // SegmentTimeline never grows, so at the live edge we must go back to the
+  // origin to obtain newer segments — effectively reloading the stream the way
+  // a channel switch would.
+  //
+  // The `…php?id=` origin intermittently returns a non-MPD body (rate-limit /
+  // error page), which parses to "Expected a single root element". Rather than
+  // failing the whole session on one bad response, retry a few times; a later
+  // attempt almost always succeeds.
   Future<DashManifest?> _fetchManifest({bool fromOrigin = false}) async {
-    final source =
-        (!fromOrigin && _resolvedMpdUrl.isNotEmpty) ? _resolvedMpdUrl : _mpdUrl;
-    try {
-      final fetched = await _fetchFollowingRedirects(source);
-      _resolvedMpdUrl = fetched.$1;
-      final body = utf8.decode(fetched.$2, allowMalformed: true);
-      return const DashManifestParser().parse(fetched.$1, body);
-    } catch (error, st) {
-      debugPrint('dash: manifest fetch/parse failed: $error\n$st');
-      return null;
+    for (var attempt = 0; attempt < _manifestAttempts; attempt++) {
+      // After a first failure, ignore the pinned .mpd and go back to origin.
+      final useOrigin = fromOrigin || attempt > 0;
+      final source =
+          (!useOrigin && _resolvedMpdUrl.isNotEmpty) ? _resolvedMpdUrl : _mpdUrl;
+      try {
+        final fetched = await _fetchFollowingRedirects(source);
+        _resolvedMpdUrl = fetched.$1;
+        final body = utf8.decode(fetched.$2, allowMalformed: true);
+        return const DashManifestParser().parse(fetched.$1, body);
+      } catch (error) {
+        debugPrint('dash: manifest fetch/parse failed '
+            '(attempt ${attempt + 1}/$_manifestAttempts): $error');
+        if (attempt + 1 < _manifestAttempts) {
+          await Future<void>.delayed(const Duration(milliseconds: 600));
+        }
+      }
     }
+    return null;
   }
+
+  static const int _manifestAttempts = 4;
 
   Future<(String, Uint8List)> _fetchFollowingRedirects(String url) async {
     var current = Uri.parse(url);
