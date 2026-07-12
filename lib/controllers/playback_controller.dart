@@ -182,10 +182,10 @@ class PlaybackController extends ChangeNotifier {
         // verbose per-frame/demuxer chatter used while diagnosing is gone.
         logLevel: MPVLogLevel.warn,
         // Forward read-ahead cache. media_kit turns this into mpv's
-        // `demuxer-max-bytes`. 32 MiB is plenty of buffering for IPTV while
-        // keeping the resident cache modest. (It also seeds
-        // `demuxer-max-back-bytes`, which we override per-stream below.)
-        bufferSize: 32 * 1024 * 1024,
+        // `demuxer-max-bytes`. Sized generously here (overridden per-stream in
+        // _applyPlaybackOptions) so DASH playback can buffer many seconds and
+        // ride out slow segment downloads on rate-limited CDNs.
+        bufferSize: 128 * 1024 * 1024,
       ),
     );
     final nextVideoController = VideoController(
@@ -793,10 +793,19 @@ class PlaybackController extends ChangeNotifier {
       // Keep the last decoded frame on EOF so a fast `loadfile replace` at a
       // segment boundary does not flash black while the next connection opens.
       'keep-open': 'yes',
-      // Let mpv actually use more of media_kit's 32 MiB forward buffer. This
-      // does not stitch independent segments together (so no rewind risk), but
-      // it smooths ordinary intra-segment network jitter.
-      'demuxer-readahead-secs': '8',
+      // Let mpv actually use more of media_kit's forward buffer. This does not
+      // stitch independent segments together (so no rewind risk), but it lets
+      // mpv hold many seconds of demuxed data so a slow segment download (the
+      // ~8s outliers on this rate-limited CDN) doesn't drain the buffer and
+      // stall playback.
+      'demuxer-readahead-secs': '60',
+      // Also cap the total forward demuxer cache generously so readahead-secs
+      // isn't the limiting factor for the low-bitrate stream.
+      'demuxer-max-bytes': (128 * 1024 * 1024).toString(),
+      // We buffer entirely in memory (the demuxer cache above plus our own
+      // producer queue), so stop mpv trying to spill the cache to a disk file
+      // — that attempt just fails with "lavf: Failed to create file cache".
+      'cache-on-disk': 'no',
       // media_kit sizes mpv's backward demuxer cache from `bufferSize` too, so
       // it grows toward tens of MiB the entire time a stream plays. Live IPTV
       // can never seek backward, so that buffer is pure wasted RAM. Cap it hard.
