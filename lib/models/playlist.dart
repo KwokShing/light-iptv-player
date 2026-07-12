@@ -1,5 +1,5 @@
 import '../constants.dart';
-import '../dash_clearkey.dart';
+import '../dash/clearkey_license.dart';
 
 enum SourceKind { local, online, single }
 

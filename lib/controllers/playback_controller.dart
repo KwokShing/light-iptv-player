@@ -9,7 +9,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 
-import '../dash_clearkey.dart';
+import '../dash/dash_stream_server.dart';
 import '../models/playlist.dart';
 import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
@@ -37,9 +37,10 @@ class PlaybackController extends ChangeNotifier {
   int _engineGeneration = 0;
   int get engineGeneration => _engineGeneration;
 
-  // Local decrypting proxy for ClearKey-protected MPEG-DASH. When active, mpv
-  // is pointed at its rewritten local manifest instead of the origin URL.
-  final DashClearKeyProxy _clearKeyProxy = DashClearKeyProxy();
+  // Local exo_driven DASH engine for ClearKey-protected MPEG-DASH. When active,
+  // mpv is pointed at its single muxed/decrypted local fMP4 stream instead of
+  // the origin URL.
+  final DashStreamServer _dashServer = DashStreamServer();
   // The URL actually handed to mpv for the current channel: the origin URL for
   // plain streams, or the proxy's local manifest for ClearKey DASH. Used by the
   // reconnect path so it reloads the right source.
@@ -135,7 +136,7 @@ class PlaybackController extends ChangeNotifier {
     _cursorHideTimer?.cancel();
     playerFocusNode.dispose();
     streamUrlController.dispose();
-    _clearKeyProxy.dispose();
+    _dashServer.dispose();
     player.dispose();
     _messages.close();
     super.dispose();
@@ -443,23 +444,24 @@ class PlaybackController extends ChangeNotifier {
     if (_disposed || request != playbackRequest) return;
 
     // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the
-    // stream through the local proxy which fetches, decrypts (AES-128-CTR) and
-    // rewrites segments to clear fMP4. mpv then plays the proxy's local
-    // manifest. Plain streams keep using their origin URL directly.
+    // stream through the local exo_driven engine which parses the MPD, picks a
+    // video + audio Representation, downloads/decrypts (AES-128-CTR) segments
+    // and muxes them into a single clear fMP4. mpv then plays that local
+    // stream. Plain streams keep using their origin URL directly.
     var streamUrl = channel.url;
     if (channel.isEncryptedDash) {
       try {
-        streamUrl = await _clearKeyProxy.start(channel.url, channel.clearKeys);
-        debugPrint('ClearKey proxy started: $streamUrl');
+        streamUrl = await _dashServer.start(channel.url, channel.clearKeys);
+        debugPrint('DASH engine started: $streamUrl');
       } catch (error) {
-        debugPrint('ClearKey proxy failed to start: $error');
+        debugPrint('DASH engine failed to start: $error');
         if (_disposed || request != playbackRequest) return;
         _failureLabel = 'Load error';
         notifyListeners();
         return;
       }
     } else {
-      await _clearKeyProxy.stop();
+      await _dashServer.stop();
     }
     if (_disposed || request != playbackRequest) return;
 
@@ -624,7 +626,7 @@ class PlaybackController extends ChangeNotifier {
     _ytdlGraceTimer = null;
     _activeStreamUrl = '';
     _clearFreezeFrame();
-    unawaited(_clearKeyProxy.stop());
+    unawaited(_dashServer.stop());
     streamUrlController.clear();
     try {
       await player.stop();
