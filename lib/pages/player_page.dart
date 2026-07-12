@@ -205,6 +205,41 @@ class _PlayerPageState extends State<PlayerPage> {
                                                 ),
                                               ),
                                             ),
+                                          // Loading spinner for a normal open
+                                          // (plain video or MPD) that hasn't
+                                          // rendered its first frame yet, or a
+                                          // mid-stream stall (mpv buffering).
+                                          // The reconnect overlay above owns the
+                                          // segment-boundary case, so `loading`
+                                          // is false while reconnecting.
+                                          if (playback.loading)
+                                            const Positioned.fill(
+                                              child: Center(
+                                                child: DecoratedBox(
+                                                  decoration: BoxDecoration(
+                                                    color: Colors.black54,
+                                                    borderRadius:
+                                                        BorderRadius.all(
+                                                          Radius.circular(16),
+                                                        ),
+                                                  ),
+                                                  child: Padding(
+                                                    padding: EdgeInsets.all(20),
+                                                    child: SizedBox(
+                                                      width: 48,
+                                                      height: 48,
+                                                      child: CircularProgressIndicator(
+                                                        strokeWidth: 3,
+                                                        valueColor:
+                                                            AlwaysStoppedAnimation<
+                                                              Color
+                                                            >(Colors.white),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
                                           if (fullscreen)
                                             FullscreenControls(
                                               visible: !playback.cursorHidden,

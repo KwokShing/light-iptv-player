@@ -57,6 +57,7 @@ class PlaybackController extends ChangeNotifier {
   StreamSubscription<Track>? _trackSubscription;
   StreamSubscription<bool>? _completedSubscription;
   StreamSubscription<bool>? _playingSubscription;
+  StreamSubscription<bool>? _bufferingSubscription;
   StreamSubscription<Duration>? _positionSubscription;
   StreamSubscription<Duration>? _durationSubscription;
   StreamSubscription<String>? _errorSubscription;
@@ -69,6 +70,23 @@ class PlaybackController extends ChangeNotifier {
   Timer? _connectTimer;
   int _reconnectAttempts = 0;
   bool reconnecting = false;
+  // mpv's raw buffering/stall state (player.stream.buffering). True while the
+  // demuxer cache is draining and playback is stalled.
+  bool _buffering = false;
+  // True while the stream is opening (from play() until the first frame is
+  // rendered) or while mpv is stalled mid-stream (buffering). Drives the
+  // spinner overlay for both plain videos and DASH/MPD streams. Kept false
+  // once a real load failure is recorded or during the reconnect flow (which
+  // has its own freeze-frame + spinner overlay).
+  bool get loading {
+    if (nowPlaying == null || _failureLabel != null || reconnecting) {
+      return false;
+    }
+    // Still opening: no frame yet.
+    if (!_everPlayed) return true;
+    // Started, but mpv has stalled waiting for data.
+    return _buffering;
+  }
   // Set true once a channel has actually started rendering. Distinguishes a
   // legitimate mid-stream segment boundary (reconnect is desirable) from a
   // stream that could never connect in the first place (reconnecting forever,
@@ -147,6 +165,7 @@ class PlaybackController extends ChangeNotifier {
     _trackSubscription?.cancel();
     _completedSubscription?.cancel();
     _playingSubscription?.cancel();
+    _bufferingSubscription?.cancel();
     _positionSubscription?.cancel();
     _durationSubscription?.cancel();
     _errorSubscription?.cancel();
@@ -267,6 +286,15 @@ class PlaybackController extends ChangeNotifier {
       // actually started" is detected separately via decoded frames/position.
       if (isPlaying != playing) {
         isPlaying = playing;
+        notifyListeners();
+      }
+    });
+    // mpv's real buffering/stall signal. While true mid-playback the picture is
+    // frozen waiting for the demuxer cache to refill, so show the spinner.
+    _bufferingSubscription = player.stream.buffering.listen((buffering) {
+      if (_disposed) return;
+      if (_buffering != buffering) {
+        _buffering = buffering;
         notifyListeners();
       }
     });
@@ -411,6 +439,7 @@ class PlaybackController extends ChangeNotifier {
     reconnecting = false;
     _reconnectAttempts = 0;
     _everPlayed = false;
+    _buffering = false;
     _startupStopwatch = Stopwatch()..start();
     _startupUrl = channel.url;
     _failureLabel = null;
@@ -493,6 +522,11 @@ class PlaybackController extends ChangeNotifier {
     await _applyPlaybackOptions();
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
+    // A recreated engine starts at mpv's default volume (100, unmuted), so the
+    // controller's current volume/mute state must be pushed back onto it —
+    // otherwise switching channels while muted would silently play at full
+    // volume even though the UI still shows muted.
+    await _applyVolumeToEngine();
     _connectTimer?.cancel();
   }
 
@@ -620,6 +654,7 @@ class PlaybackController extends ChangeNotifier {
     reconnecting = false;
     _reconnectAttempts = 0;
     _everPlayed = false;
+    _buffering = false;
     _failureLabel = null;
     _lastYtdlHookErrorAt = null;
     _ytdlGraceTimer?.cancel();
@@ -686,6 +721,18 @@ class PlaybackController extends ChangeNotifier {
     notifyListeners();
     try {
       await player.setVolume(next);
+    } catch (_) {}
+  }
+
+  // Push the controller's current volume/mute state onto the active engine.
+  // Volume/mute is global (owned by the controller, not any one stream), so it
+  // must be re-applied whenever the engine is recreated or a new stream opens;
+  // a fresh mpv engine otherwise defaults to 100 / unmuted. When muted, the
+  // controller's `volume` is already 0 (the pre-mute level lives in
+  // _volumeBeforeMute), so setting the engine to `volume` covers both cases.
+  Future<void> _applyVolumeToEngine() async {
+    try {
+      await player.setVolume(volume);
     } catch (_) {}
   }
 
