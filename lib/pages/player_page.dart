@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../constants.dart';
 import '../controllers/epg_controller.dart';
 import '../controllers/playback_controller.dart';
+import '../controllers/sources_controller.dart';
 import '../controllers/ui_controller.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
@@ -379,8 +380,17 @@ class _PlayerPageState extends State<PlayerPage> {
   Future<void> _showSourcesPage(BuildContext context) async {
     final ui = context.read<UiController>();
     final playback = context.read<PlaybackController>();
+    final sources = context.read<SourcesController>();
+    final temporaryId = ui.temporarySourceId;
     await playback.stopPlayback();
     ui.showSourcesPage();
     playback.resetFullscreenState();
+    // Discard the throwaway source created by a Ctrl+V paste so it doesn't
+    // linger in the saved sources list once we're back home.
+    if (temporaryId != null) {
+      ui.temporarySourceId = null;
+      final matches = sources.sources.where((item) => item.id == temporaryId);
+      if (matches.isNotEmpty) await sources.delete(matches.first);
+    }
   }
 }

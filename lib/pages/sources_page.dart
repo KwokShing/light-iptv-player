@@ -14,8 +14,35 @@ import '../widgets/proxy_button.dart';
 import '../widgets/source_widgets.dart';
 import '../widgets/top_bar.dart';
 
-class SourcesPage extends StatelessWidget {
+class SourcesPage extends StatefulWidget {
   const SourcesPage({super.key});
+
+  @override
+  State<SourcesPage> createState() => _SourcesPageState();
+}
+
+class _SourcesPageState extends State<SourcesPage> {
+  // Own focus node so Ctrl+V keeps working every time the sources page is
+  // shown. Without re-requesting focus here the player page (kept mounted
+  // underneath in a Stack) holds focus after the first paste and swallows the
+  // shortcut.
+  final FocusNode _focusNode = FocusNode(debugLabel: 'SourcesPage');
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _requestFocus());
+  }
+
+  @override
+  void dispose() {
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  void _requestFocus() {
+    if (mounted && !_focusNode.hasFocus) _focusNode.requestFocus();
+  }
 
   void _showMessage(BuildContext context, String text) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
@@ -164,7 +191,7 @@ class SourcesPage extends StatelessWidget {
     final playback = context.read<PlaybackController>();
     await sources.upsert(source);
     await playback.stopPlayback();
-    ui.openSource(source);
+    ui.openTemporarySource(source);
     await playback.play(channel);
   }
 
@@ -246,12 +273,16 @@ class SourcesPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final sources = context.watch<SourcesController>();
     final update = context.watch<UpdateController>();
+    // Re-assert focus whenever this page rebuilds/re-shows so Ctrl+V keeps
+    // working after returning from the player.
+    WidgetsBinding.instance.addPostFrameCallback((_) => _requestFocus());
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
             _pasteAndPlay(context),
       },
       child: Focus(
+        focusNode: _focusNode,
         autofocus: true,
         child: Scaffold(
           backgroundColor: AppColors.bg,

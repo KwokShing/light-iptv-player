@@ -28,6 +28,11 @@ class UiController extends ChangeNotifier {
   String activeGroup = allChannels;
   String search = '';
 
+  // Id of a throwaway source created by the Ctrl+V "paste and play" flow. It is
+  // deleted automatically once the user leaves the player and returns to the
+  // sources list, so quick pastes never accumulate in the saved sources.
+  String? temporarySourceId;
+
   @override
   void dispose() {
     _replacedSub?.cancel();
@@ -67,6 +72,13 @@ class UiController extends ChangeNotifier {
     activeGroup = allChannels;
     search = '';
     notifyListeners();
+  }
+
+  /// Opens a throwaway source (from the Ctrl+V paste flow) and records its id so
+  /// it can be discarded when the user returns to the sources list.
+  void openTemporarySource(PlaylistSource source) {
+    temporarySourceId = source.id;
+    openSource(source);
   }
 
   void showSourcesPage() {
