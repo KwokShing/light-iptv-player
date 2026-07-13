@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/playlist.dart';
 import '../theme.dart';
@@ -69,8 +70,9 @@ class PlaybackControls extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Info line: channel name + inline EPG now/next, all on one row so
-              // the card stays short and the video pane can be larger.
+              // Info line: channel name, inline EPG now/next, and the current
+              // stream URL (horizontally scrollable) with a copy button — all
+              // on one row so the card stays short and the video pane is large.
               if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false))
                 Padding(
                   padding: const EdgeInsets.only(bottom: 2),
@@ -105,7 +107,13 @@ class PlaybackControls extends StatelessWidget {
                         ),
                       ] else
                         const Spacer(),
-                      _UrlButton(controller: streamUrlController),
+                      if (streamUrlController.text.isNotEmpty) ...[
+                        const SizedBox(width: 10),
+                        SizedBox(
+                          width: 320,
+                          child: _StreamUrlBar(url: streamUrlController.text),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -215,53 +223,49 @@ class PlaybackControls extends StatelessWidget {
   }
 }
 
-/// A compact link icon that reveals/copies the current stream URL on demand,
-/// replacing the old always-visible URL text field so the transport bar can be
-/// a single row.
-class _UrlButton extends StatelessWidget {
-  const _UrlButton({required this.controller});
+/// The current stream URL on a single line: a copy button plus the URL in a
+/// horizontal scroll view, so a long URL can be scrolled and copied without
+/// wrapping or truncating the transport bar.
+class _StreamUrlBar extends StatelessWidget {
+  const _StreamUrlBar({required this.url});
 
-  final TextEditingController controller;
+  final String url;
 
   @override
   Widget build(BuildContext context) {
-    return TransportButton(
-      icon: Icons.link_rounded,
-      tooltip: controller.text.isEmpty ? 'Stream URL' : controller.text,
-      onPressed: controller.text.isEmpty
-          ? null
-          : () => _showUrl(context, controller.text),
-    );
-  }
-
-  void _showUrl(BuildContext context, String url) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text(
-          'Stream URL',
-          style: TextStyle(color: AppColors.textPrimary),
-        ),
-        content: SizedBox(
-          width: 460,
-          child: SelectableText(
-            url,
-            style: const TextStyle(
-              fontSize: 12.5,
-              color: AppColors.textSecondary,
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          onTap: () => Clipboard.setData(ClipboardData(text: url)),
+          borderRadius: BorderRadius.circular(6),
+          hoverColor: AppColors.surfaceMuted,
+          child: const Padding(
+            padding: EdgeInsets.all(4),
+            child: Icon(
+              Icons.copy_rounded,
+              size: 15,
+              color: AppColors.textMuted,
             ),
           ),
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            style: TextButton.styleFrom(
-              foregroundColor: AppColors.textSecondary,
+        const SizedBox(width: 4),
+        Expanded(
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Text(
+              url,
+              maxLines: 1,
+              softWrap: false,
+              style: const TextStyle(
+                fontSize: 11.5,
+                color: AppColors.textMuted,
+                height: 1.1,
+              ),
             ),
-            child: const Text('Close'),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

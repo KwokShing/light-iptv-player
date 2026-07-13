@@ -42,10 +42,10 @@ Future<void> main() async {
     const WindowOptions(
       title: 'Light IPTV Player',
       // Sized so the video pane (window minus the fixed 440px side columns and
-      // the top/transport chrome) lands close to 16:9, minimizing the
-      // letterbox space above/below a 16:9 stream.
-      size: Size(1500, 740),
-      minimumSize: Size(1180, 680),
+      // the top/transport chrome) sits at ~16:9, so a 16:9 stream fills it with
+      // minimal letterboxing on any side.
+      size: Size(1500, 725),
+      minimumSize: Size(1180, 672),
       center: true,
     ),
     () async {
