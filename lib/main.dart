@@ -41,10 +41,11 @@ Future<void> main() async {
   await windowManager.waitUntilReadyToShow(
     const WindowOptions(
       title: 'Light IPTV Player',
-      // 90% of the tuned 1446x832 size. Sized so the video pane lands close to
-      // 16:9 with the current chrome (top bar + side columns + transport bar).
-      size: Size(1301, 749),
-      minimumSize: Size(1120, 640),
+      // Taller default so the video pane fills more of its column and leaves
+      // less letterbox space above/below a 16:9 stream, given the fixed side
+      // columns and the compact top/transport chrome.
+      size: Size(1301, 860),
+      minimumSize: Size(1120, 720),
       center: true,
     ),
     () async {
