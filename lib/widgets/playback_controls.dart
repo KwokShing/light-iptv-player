@@ -18,7 +18,6 @@ class PlaybackControls extends StatelessWidget {
     required this.duration,
     required this.onSeekChanged,
     required this.onSeekEnd,
-    required this.hwActive,
     required this.deinterlace,
     required this.onReplay,
     required this.onPlayPause,
@@ -30,6 +29,7 @@ class PlaybackControls extends StatelessWidget {
     required this.onFullscreen,
     this.epgUrl,
     this.onGuide,
+    this.onDebugLog,
   });
 
   final TextEditingController streamUrlController;
@@ -42,7 +42,6 @@ class PlaybackControls extends StatelessWidget {
   final Duration duration;
   final ValueChanged<double>? onSeekChanged;
   final ValueChanged<double>? onSeekEnd;
-  final bool hwActive;
   final bool deinterlace;
   final VoidCallback? onReplay;
   final VoidCallback? onPlayPause;
@@ -54,6 +53,7 @@ class PlaybackControls extends StatelessWidget {
   final VoidCallback? onFullscreen;
   final String? epgUrl;
   final VoidCallback? onGuide;
+  final VoidCallback? onDebugLog;
 
   @override
   Widget build(BuildContext context) {
@@ -189,12 +189,17 @@ class PlaybackControls extends StatelessWidget {
                   ],
                   if (hasChannel)
                     TransportButton(
+                      icon: Icons.bug_report_outlined,
+                      tooltip: 'Debug log',
+                      onPressed: onDebugLog,
+                    ),
+                  if (hasChannel)
+                    TransportButton(
                       icon: Icons.calendar_month_rounded,
                       tooltip: 'Programme guide',
                       onPressed: onGuide,
                     ),
                   _RightControls(
-                    hwActive: hwActive,
                     deinterlace: deinterlace,
                     onDeinterlace: onDeinterlace,
                     onSnapshot: onSnapshot,
@@ -406,19 +411,16 @@ class FullscreenControls extends StatelessWidget {
 }
 
 /// The status/action cluster pinned to the right edge of the transport bar:
-/// the HW/SW decode badge followed by the deinterlace, snapshot and fullscreen
-/// buttons. Grouped so it keeps a stable position regardless of how long the
-/// adjacent playback-info text is.
+/// the deinterlace, snapshot and fullscreen buttons. Grouped so it keeps a
+/// stable position regardless of how long the adjacent playback-info text is.
 class _RightControls extends StatelessWidget {
   const _RightControls({
-    required this.hwActive,
     required this.deinterlace,
     required this.onDeinterlace,
     required this.onSnapshot,
     required this.onFullscreen,
   });
 
-  final bool hwActive;
   final bool deinterlace;
   final VoidCallback? onDeinterlace;
   final VoidCallback? onSnapshot;
@@ -429,25 +431,6 @@ class _RightControls extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: hwActive ? AppColors.accentSoft : AppColors.surfaceMuted,
-            borderRadius: BorderRadius.circular(6),
-            border: Border.all(
-              color: hwActive ? AppColors.accentBorder : AppColors.border,
-            ),
-          ),
-          child: Text(
-            hwActive ? 'HW' : 'SW',
-            style: TextStyle(
-              color: hwActive ? AppColors.accent : AppColors.textMuted,
-              fontSize: 11,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
         TransportButton(
           icon: Icons.deblur_rounded,
           tooltip:

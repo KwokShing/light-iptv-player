@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../constants.dart';
 import '../models/epg.dart';
 import '../models/playlist.dart';
+import '../services/debug_log_service.dart';
 import '../services/epg_parser.dart';
 
 /// Owns EPG (XMLTV) guides: which URL each playlist uses, downloading and
@@ -139,9 +140,19 @@ class EpgController extends ChangeNotifier {
       _fetchedAt[url] = DateTime.now().toUtc();
       unawaited(_writeCache(url, bytes));
       unawaited(_saveIndex());
+      DebugLogService.instance.add(
+        'Loaded guide: ${guide.channelCount} channels, '
+        '${guide.programmeCount} programmes ($url)',
+        source: 'epg',
+      );
       _bump();
     } catch (error) {
       _errors[url] = error.toString();
+      DebugLogService.instance.add(
+        'Guide load failed ($url): $error',
+        level: DebugLogLevel.error,
+        source: 'epg',
+      );
       debugPrint('EPG load failed for $url: $error');
     } finally {
       _loading.remove(url);

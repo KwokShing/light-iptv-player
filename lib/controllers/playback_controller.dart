@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../dash/dash_stream_server.dart';
 import '../models/playlist.dart';
+import '../services/debug_log_service.dart';
 import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
 
@@ -140,6 +141,7 @@ class PlaybackController extends ChangeNotifier {
   Stream<String> get messages => _messages.stream;
   void _showMessage(String text) {
     if (_disposed) return;
+    DebugLogService.instance.add(text, source: 'app');
     _messages.add(text);
   }
 
@@ -343,6 +345,16 @@ class PlaybackController extends ChangeNotifier {
     // events (player.stream.error, handled above) are.
     _logSubscription = player.stream.log.listen((log) {
       debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
+      final level = switch (log.level) {
+        'error' || 'fatal' => DebugLogLevel.error,
+        'warn' => DebugLogLevel.warn,
+        _ => DebugLogLevel.info,
+      };
+      DebugLogService.instance.add(
+        '${log.prefix}: ${log.text}',
+        level: level,
+        source: 'mpv',
+      );
       if (log.level == 'error' && log.prefix == 'ytdl_hook') {
         _lastYtdlHookErrorAt = DateTime.now();
       }
@@ -465,6 +477,10 @@ class PlaybackController extends ChangeNotifier {
     duration = Duration.zero;
     _seeking = false;
     notifyListeners();
+    DebugLogService.instance.add(
+      'Play: ${channel.name} — ${channel.url}',
+      source: 'app',
+    );
     if (needsEngineSwap) {
       await _recreateEngine();
     } else {
@@ -482,8 +498,17 @@ class PlaybackController extends ChangeNotifier {
       try {
         streamUrl = await _dashServer.start(channel.url, channel.clearKeys);
         debugPrint('DASH engine started: $streamUrl');
+        DebugLogService.instance.add(
+          'ClearKey DASH engine started',
+          source: 'app',
+        );
       } catch (error) {
         debugPrint('DASH engine failed to start: $error');
+        DebugLogService.instance.add(
+          'DASH engine failed to start: $error',
+          level: DebugLogLevel.error,
+          source: 'app',
+        );
         if (_disposed || request != playbackRequest) return;
         _failureLabel = 'Load error';
         notifyListeners();
@@ -592,6 +617,11 @@ class PlaybackController extends ChangeNotifier {
     if (nowPlaying == null) return;
     if (_reconnectAttempts >= _maxReconnectAttempts) {
       debugPrint('Reconnect: giving up after $_reconnectAttempts attempts');
+      DebugLogService.instance.add(
+        'Reconnect: gave up after $_reconnectAttempts attempts',
+        level: DebugLogLevel.error,
+        source: 'app',
+      );
       if (!_disposed) {
         reconnecting = false;
         notifyListeners();
@@ -619,6 +649,11 @@ class PlaybackController extends ChangeNotifier {
         ? _activeStreamUrl
         : channel.url;
     debugPrint('Reconnecting stream (attempt $_reconnectAttempts): $reloadUrl');
+    DebugLogService.instance.add(
+      'Reconnecting (attempt $_reconnectAttempts)',
+      level: DebugLogLevel.warn,
+      source: 'app',
+    );
     try {
       if (_reconnectAttempts > 1) {
         await _applyPlaybackOptions();

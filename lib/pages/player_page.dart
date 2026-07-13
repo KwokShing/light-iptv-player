@@ -9,6 +9,7 @@ import '../controllers/ui_controller.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
 import '../widgets/channel_list.dart';
+import '../widgets/debug_log_sidebar.dart';
 import '../widgets/epg_schedule_panel.dart';
 import '../widgets/playback_controls.dart';
 import '../widgets/proxy_button.dart';
@@ -324,7 +325,6 @@ class _PlayerPageState extends State<PlayerPage> {
                                   onSeekEnd: playback.nowPlaying == null
                                       ? null
                                       : playback.onSeekEnd,
-                                  hwActive: playback.hwActive,
                                   deinterlace: playback.deinterlace,
                                   onReplay: playback.nowPlaying == null
                                       ? null
@@ -357,6 +357,9 @@ class _PlayerPageState extends State<PlayerPage> {
                                           channel: playback.nowPlaying!,
                                           epgUrl: source.epgUrl,
                                         ),
+                                  onDebugLog: playback.nowPlaying == null
+                                      ? null
+                                      : () => showDebugLog(context),
                                 ),
                             ],
                           ),
