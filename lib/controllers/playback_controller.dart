@@ -107,6 +107,13 @@ class PlaybackController extends ChangeNotifier {
   Timer? _ytdlGraceTimer;
   static const _ytdlGracePeriod = Duration(seconds: 20);
 
+  // True once the current engine has been handed media to play (so its texture
+  // may be holding a rendered frame). Reset when the engine is recreated. Used
+  // to decide whether the next play() must swap engines to drop a stale frame —
+  // `nowPlaying` can't be used for this because stopPlayback() clears it while
+  // the old texture still shows the previous stream's last frame.
+  bool _engineDirty = false;
+
   Uint8List? lastFrame;
   int? videoBitrate;
   double? containerFps;
@@ -182,14 +189,24 @@ class PlaybackController extends ChangeNotifier {
   /// previous channel's final frame. The player page rebinds via
   /// [engineGeneration].
   Future<void> _recreateEngine() async {
+    _swapEngine();
+    notifyListeners();
+  }
+
+  /// Disposes the current engine and installs a fresh blank one. Frees the
+  /// native render context and unregisters the Flutter texture (dropping the
+  /// last decoded frame the texture retains by design), then rebinds the UI via
+  /// [engineGeneration]. Callers are responsible for calling notifyListeners()
+  /// at an appropriate point.
+  void _swapEngine() {
     _cancelStreamSubscriptions();
     final old = player;
     final engine = _createPlaybackEngine();
     player = engine.$1;
     videoController = engine.$2;
+    _engineDirty = false;
     _engineGeneration++;
     _listenPlaybackInfo();
-    notifyListeners();
     // Dispose the old engine after the swap so the UI can bind the new texture
     // first; the black gap between the two is what replaces the stale frame.
     unawaited(old.dispose().catchError((_) {}));
@@ -441,11 +458,11 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play(Channel channel) async {
     final request = ++playbackRequest;
-    // A previously-selected channel means the engine has (or will have) painted
-    // a frame that its texture would otherwise retain across the switch. In that
-    // case rebuild the engine so the stale frame is truly released; on the very
-    // first play the freshly-constructed engine is still blank, so reuse it.
-    final needsEngineSwap = nowPlaying != null;
+    // A dirty engine has already painted a frame that its texture would
+    // otherwise retain across a channel switch. Rebuild the engine so the stale
+    // frame is truly released; a pristine engine (first play, or one freshly
+    // recreated by stopPlayback) is still blank, so reuse it.
+    final needsEngineSwap = _engineDirty;
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
     reconnecting = false;
@@ -547,6 +564,7 @@ class PlaybackController extends ChangeNotifier {
     await _applyPlaybackOptions();
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
+    _engineDirty = true;
     // A recreated engine starts at mpv's default volume (100, unmuted), so the
     // controller's current volume/mute state must be pushed back onto it —
     // otherwise switching channels while muted would silently play at full
@@ -698,10 +716,20 @@ class PlaybackController extends ChangeNotifier {
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
     streamUrlController.clear();
-    try {
-      await player.stop();
-    } catch (error) {
-      _showMessage('Failed to stop playback: $error');
+    // Tear the engine down entirely rather than just pausing it. media_kit's
+    // player.stop() leaves the last decoded frame in the Flutter texture, so a
+    // later play() (e.g. after switching playlists) would flash that stale
+    // frame. Disposing the Player frees its render context and unregisters the
+    // texture; a fresh blank engine takes its place. Only bother when the
+    // current engine has actually shown something.
+    if (_engineDirty) {
+      _swapEngine();
+    } else {
+      try {
+        await player.stop();
+      } catch (error) {
+        _showMessage('Failed to stop playback: $error');
+      }
     }
     if (_disposed) return;
     nowPlaying = null;
