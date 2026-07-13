@@ -73,7 +73,7 @@ class SourcesController extends ChangeNotifier {
   // on the main isolate (CharsetConverter uses platform channels and can't run
   // in a background isolate), but the CPU-heavy M3U parse is offloaded via
   // `compute` so it never janks the UI. Throws on failure.
-  Future<List<Channel>> _fetchChannels(PlaylistSource source) async {
+  Future<ParsedPlaylist> _fetchChannels(PlaylistSource source) async {
     if (source.kind == SourceKind.local) {
       final text = await decodePlaylistBytes(
         await File(source.source).readAsBytes(),
@@ -111,8 +111,14 @@ class SourcesController extends ChangeNotifier {
     _refreshingSourceIds = {..._refreshingSourceIds, source.id};
     notifyListeners();
     try {
-      final channels = await _fetchChannels(source);
-      await replace(source.copyWith(channels: channels, cached: true));
+      final parsed = await _fetchChannels(source);
+      await replace(
+        source.copyWith(
+          channels: parsed.channels,
+          cached: true,
+          epgUrl: parsed.epgUrl,
+        ),
+      );
     } catch (error) {
       _message('Update failed for "${source.name}": $error');
     } finally {
@@ -137,25 +143,25 @@ class SourcesController extends ChangeNotifier {
     _refreshingAll = true;
     notifyListeners();
 
-    Future<({String id, String name, List<Channel>? channels})> refreshOne(
+    Future<({String id, String name, ParsedPlaylist? parsed})> refreshOne(
       PlaylistSource source,
     ) async {
       try {
-        final channels = await _fetchChannels(source);
-        return (id: source.id, name: source.name, channels: channels);
+        final parsed = await _fetchChannels(source);
+        return (id: source.id, name: source.name, parsed: parsed);
       } catch (_) {
-        return (id: source.id, name: source.name, channels: null);
+        return (id: source.id, name: source.name, parsed: null);
       }
     }
 
     final results = await Future.wait(reloadable.map(refreshOne));
 
-    final updates = <String, List<Channel>>{};
+    final updates = <String, ParsedPlaylist>{};
     var succeeded = 0;
     final failures = <String>[];
     for (final result in results) {
-      if (result.channels != null) {
-        updates[result.id] = result.channels!;
+      if (result.parsed != null) {
+        updates[result.id] = result.parsed!;
         succeeded++;
       } else {
         failures.add(result.name);
@@ -163,10 +169,14 @@ class SourcesController extends ChangeNotifier {
     }
 
     PlaylistSource apply(PlaylistSource source) {
-      final channels = updates[source.id];
-      return channels == null
+      final parsed = updates[source.id];
+      return parsed == null
           ? source
-          : source.copyWith(channels: channels, cached: true);
+          : source.copyWith(
+              channels: parsed.channels,
+              cached: true,
+              epgUrl: parsed.epgUrl,
+            );
     }
 
     _sources = _sources.map(apply).toList();

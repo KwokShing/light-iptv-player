@@ -3,11 +3,13 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:provider/provider.dart';
 
 import '../constants.dart';
+import '../controllers/epg_controller.dart';
 import '../controllers/playback_controller.dart';
 import '../controllers/ui_controller.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
 import '../widgets/channel_list.dart';
+import '../widgets/epg_schedule_panel.dart';
 import '../widgets/playback_controls.dart';
 import '../widgets/proxy_button.dart';
 import '../widgets/top_bar.dart';
@@ -25,6 +27,20 @@ class _PlayerPageState extends State<PlayerPage> {
   final TextEditingController _searchController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    _loadEpg();
+  }
+
+  void _loadEpg() {
+    final url = widget.source.epgUrl;
+    if (url == null || url.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<EpgController>().ensureGuide(url);
+    });
+  }
+
+  @override
   void didUpdateWidget(PlayerPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     // Switching to a different source clears any leftover search text.
@@ -35,6 +51,7 @@ class _PlayerPageState extends State<PlayerPage> {
         if (mounted) context.read<UiController>().setSearch('');
       });
     }
+    if (oldWidget.source.epgUrl != widget.source.epgUrl) _loadEpg();
   }
 
   @override
@@ -128,6 +145,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                 selected: playback.nowPlaying,
                                 scrollController: _channelScrollController,
                                 onPlay: playback.play,
+                                epgUrl: source.epgUrl,
                               ),
                             ),
                           ),
@@ -280,6 +298,8 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   : playback.toggleDeinterlace,
                                               onExitFullscreen:
                                                   playback.toggleFullscreen,
+                                              channel: playback.nowPlaying,
+                                              epgUrl: source.epgUrl,
                                             ),
                                         ],
                                       ),
@@ -329,6 +349,14 @@ class _PlayerPageState extends State<PlayerPage> {
                                       ? null
                                       : playback.toggleDeinterlace,
                                   onFullscreen: playback.toggleFullscreen,
+                                  epgUrl: source.epgUrl,
+                                  onGuide: playback.nowPlaying == null
+                                      ? null
+                                      : () => showEpgSchedule(
+                                          context,
+                                          channel: playback.nowPlaying!,
+                                          epgUrl: source.epgUrl,
+                                        ),
                                 ),
                             ],
                           ),

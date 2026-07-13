@@ -38,7 +38,8 @@ class SourcesPage extends StatelessWidget {
 
       final bytes = await file.readAsBytes();
       final text = await decodePlaylistBytes(bytes);
-      final channels = parsePlaylist(text);
+      final parsed = parsePlaylist(text);
+      final channels = parsed.channels;
       if (channels.isEmpty) {
         if (context.mounted) {
           _showMessage(context, 'No channels found in ${file.name}');
@@ -58,6 +59,7 @@ class SourcesPage extends StatelessWidget {
           source: file.path ?? file.name,
           channels: channels,
           cached: true,
+          epgUrl: parsed.epgUrl,
         ),
       );
       if (context.mounted) {
@@ -80,14 +82,16 @@ class SourcesPage extends StatelessWidget {
     if (values == null) return;
     try {
       final text = await fetchPlaylistText(values.source);
+      final parsed = parsePlaylist(text);
       await sources.upsert(
         PlaylistSource(
           id: newSourceId(),
           name: values.name,
           kind: SourceKind.online,
           source: values.source,
-          channels: parsePlaylist(text),
+          channels: parsed.channels,
           cached: true,
+          epgUrl: parsed.epgUrl,
         ),
       );
     } catch (error) {
@@ -145,11 +149,13 @@ class SourcesPage extends StatelessWidget {
         } else if (updatedSource.kind == SourceKind.online) {
           try {
             final text = await fetchPlaylistText(url);
+            final parsed = parsePlaylist(text);
             await sources.replace(
               updatedSource.copyWith(
                 source: url,
-                channels: parsePlaylist(text),
+                channels: parsed.channels,
                 cached: true,
+                epgUrl: parsed.epgUrl,
               ),
             );
           } catch (error) {
@@ -158,9 +164,14 @@ class SourcesPage extends StatelessWidget {
             }
           }
         }
-      case EditSourceResultFile(:final path, :final channels):
+      case EditSourceResultFile(:final path, :final channels, :final epgUrl):
         await sources.replace(
-          source.copyWith(source: path, channels: channels, cached: true),
+          source.copyWith(
+            source: path,
+            channels: channels,
+            cached: true,
+            epgUrl: epgUrl,
+          ),
         );
     }
   }

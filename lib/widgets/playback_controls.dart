@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'epg_widgets.dart';
 
 class PlaybackControls extends StatelessWidget {
   const PlaybackControls({
@@ -27,6 +28,8 @@ class PlaybackControls extends StatelessWidget {
     required this.onSnapshot,
     required this.onDeinterlace,
     required this.onFullscreen,
+    this.epgUrl,
+    this.onGuide,
   });
 
   final TextEditingController streamUrlController;
@@ -49,76 +52,65 @@ class PlaybackControls extends StatelessWidget {
   final VoidCallback? onSnapshot;
   final VoidCallback? onDeinterlace;
   final VoidCallback? onFullscreen;
+  final String? epgUrl;
+  final VoidCallback? onGuide;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = constraints.maxWidth < 620;
+        final compact = constraints.maxWidth < 720;
         final hasChannel = nowPlaying != null;
+        final hasEpg = hasChannel && epgUrl != null;
         return Container(
-          margin: const EdgeInsets.only(top: 12),
-          padding: const EdgeInsets.fromLTRB(16, 12, 12, 8),
-          decoration: cardDecoration(radius: 14),
+          margin: const EdgeInsets.only(top: 8),
+          padding: const EdgeInsets.fromLTRB(12, 6, 8, 6),
+          decoration: cardDecoration(radius: 12),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false)) ...[
-                SizedBox(
-                  width: double.infinity,
-                  child: Text(
-                    nowPlaying!.name,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
-                      color: AppColors.textPrimary,
-                    ),
+              // Info line: channel name + inline EPG now/next, all on one row so
+              // the card stays short and the video pane can be larger.
+              if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false))
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Row(
+                    children: [
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 220),
+                        child: Text(
+                          nowPlaying!.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: AppColors.textPrimary,
+                          ),
+                        ),
+                      ),
+                      if (hasEpg) ...[
+                        const SizedBox(width: 10),
+                        Container(
+                          width: 1,
+                          height: 14,
+                          color: AppColors.border,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: NowNextInline(
+                            channel: nowPlaying!,
+                            epgUrl: epgUrl,
+                          ),
+                        ),
+                      ] else
+                        const Spacer(),
+                      _UrlButton(controller: streamUrlController),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 6),
-              ],
-              SizedBox(
-                height: 34,
-                child: TextField(
-                  controller: streamUrlController,
-                  readOnly: true,
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    color: AppColors.textSecondary,
-                  ),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    filled: true,
-                    fillColor: AppColors.surfaceMuted,
-                    hintText: 'Stream URL',
-                    hintStyle: const TextStyle(
-                      fontSize: 12.5,
-                      color: AppColors.textMuted,
-                    ),
-                    prefixIcon: const Icon(
-                      Icons.link_rounded,
-                      size: 17,
-                      color: AppColors.textMuted,
-                    ),
-                    prefixIconConstraints: const BoxConstraints(
-                      minWidth: 32,
-                      minHeight: 0,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(vertical: 9),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(10),
-                      borderSide: BorderSide.none,
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 2),
-              SeekBar(
-                position: position,
-                duration: duration,
-                onChanged: onSeekChanged,
-                onChangeEnd: onSeekEnd,
-              ),
+              // Control line: transport buttons, volume, seek bar and the
+              // status/action cluster — a single horizontal row.
               Row(
                 children: [
                   TransportButton(
@@ -139,7 +131,7 @@ class PlaybackControls extends StatelessWidget {
                     tooltip: 'Reload stream',
                     onPressed: onReplay,
                   ),
-                  const SizedBox(width: 6),
+                  const SizedBox(width: 4),
                   TransportButton(
                     icon: muted || volume == 0
                         ? Icons.volume_off_rounded
@@ -150,7 +142,7 @@ class PlaybackControls extends StatelessWidget {
                     onPressed: onMute,
                   ),
                   SizedBox(
-                    width: compact ? 72 : 110,
+                    width: compact ? 56 : 84,
                     child: SliderTheme(
                       data: SliderTheme.of(context).copyWith(
                         trackHeight: 3,
@@ -172,22 +164,20 @@ class PlaybackControls extends StatelessWidget {
                       ),
                     ),
                   ),
-                  SizedBox(
-                    width: 30,
-                    child: Text(
-                      '${volume.round()}',
-                      style: const TextStyle(
-                        color: AppColors.textMuted,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                      ),
+                  const SizedBox(width: 8),
+                  // The seek bar takes all remaining width in the middle.
+                  Expanded(
+                    child: SeekBar(
+                      position: position,
+                      duration: duration,
+                      onChanged: onSeekChanged,
+                      onChangeEnd: onSeekEnd,
                     ),
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
+                  const SizedBox(width: 8),
+                  if (!compact) ...[
+                    Text(
                       playbackInfo,
-                      textAlign: TextAlign.end,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: AppColors.textMuted,
@@ -195,8 +185,14 @@ class PlaybackControls extends StatelessWidget {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
+                    const SizedBox(width: 8),
+                  ],
+                  if (hasChannel)
+                    TransportButton(
+                      icon: Icons.calendar_month_rounded,
+                      tooltip: 'Programme guide',
+                      onPressed: onGuide,
+                    ),
                   _RightControls(
                     hwActive: hwActive,
                     deinterlace: deinterlace,
@@ -210,6 +206,57 @@ class PlaybackControls extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// A compact link icon that reveals/copies the current stream URL on demand,
+/// replacing the old always-visible URL text field so the transport bar can be
+/// a single row.
+class _UrlButton extends StatelessWidget {
+  const _UrlButton({required this.controller});
+
+  final TextEditingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return TransportButton(
+      icon: Icons.link_rounded,
+      tooltip: controller.text.isEmpty ? 'Stream URL' : controller.text,
+      onPressed: controller.text.isEmpty
+          ? null
+          : () => _showUrl(context, controller.text),
+    );
+  }
+
+  void _showUrl(BuildContext context, String url) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text(
+          'Stream URL',
+          style: TextStyle(color: AppColors.textPrimary),
+        ),
+        content: SizedBox(
+          width: 460,
+          child: SelectableText(
+            url,
+            style: const TextStyle(
+              fontSize: 12.5,
+              color: AppColors.textSecondary,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            style: TextButton.styleFrom(
+              foregroundColor: AppColors.textSecondary,
+            ),
+            child: const Text('Close'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -233,6 +280,8 @@ class FullscreenControls extends StatelessWidget {
     required this.deinterlace,
     required this.onDeinterlace,
     required this.onExitFullscreen,
+    this.channel,
+    this.epgUrl,
   });
 
   final bool visible;
@@ -250,6 +299,8 @@ class FullscreenControls extends StatelessWidget {
   final bool deinterlace;
   final VoidCallback? onDeinterlace;
   final VoidCallback? onExitFullscreen;
+  final Channel? channel;
+  final String? epgUrl;
 
   @override
   Widget build(BuildContext context) {
@@ -303,13 +354,24 @@ class FullscreenControls extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     Expanded(
-                      child: Text(
-                        title ?? '',
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w700,
-                        ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title ?? '',
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          if (channel != null && epgUrl != null)
+                            FullscreenEpgLine(
+                              channel: channel!,
+                              epgUrl: epgUrl,
+                            ),
+                        ],
                       ),
                     ),
                     TransportButton(

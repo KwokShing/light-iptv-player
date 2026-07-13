@@ -6,6 +6,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'controllers/epg_controller.dart';
 import 'controllers/playback_controller.dart';
 import 'controllers/proxy_controller.dart';
 import 'controllers/sources_controller.dart';
@@ -79,6 +80,7 @@ class IptvApp extends StatelessWidget {
         ChangeNotifierProvider.value(value: proxyController),
         ChangeNotifierProvider(create: (_) => SourcesController()..load()),
         ChangeNotifierProvider(create: (_) => PlaybackController()),
+        ChangeNotifierProvider(create: (_) => EpgController()..restore()),
         ChangeNotifierProvider(create: (_) => UpdateController()..checkForUpdate()),
         ChangeNotifierProxyProvider<SourcesController, UiController>(
           create: (context) => UiController(

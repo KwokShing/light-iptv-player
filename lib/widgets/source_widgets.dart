@@ -91,10 +91,11 @@ class EditSourceResultUrl extends EditSourceResult {
 }
 
 class EditSourceResultFile extends EditSourceResult {
-  EditSourceResultFile(this.path, this.channels, {this.name});
+  EditSourceResultFile(this.path, this.channels, {this.name, this.epgUrl});
   final String path;
   final List<Channel> channels;
   final String? name;
+  final String? epgUrl;
 }
 
 Future<EditSourceResult?> showEditSourceDialog(
@@ -147,12 +148,16 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
 
       final bytes = await file.readAsBytes();
       final text = await decodePlaylistBytes(bytes);
-      final channels = parsePlaylist(text);
-      if (channels.isEmpty) return;
+      final parsed = parsePlaylist(text);
+      if (parsed.channels.isEmpty) return;
       if (!mounted) return;
       Navigator.pop(
         context,
-        EditSourceResultFile(file.path ?? file.name, channels),
+        EditSourceResultFile(
+          file.path ?? file.name,
+          parsed.channels,
+          epgUrl: parsed.epgUrl,
+        ),
       );
     } catch (_) {}
   }

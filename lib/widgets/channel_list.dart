@@ -6,6 +6,7 @@ import '../constants.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
 import 'common.dart';
+import 'epg_widgets.dart';
 
 /// Left navigation column showing the source name and its group list.
 /// Search lives in the app top bar now, so this only holds groups.
@@ -135,6 +136,7 @@ class ChannelList extends StatefulWidget {
     required this.scrollController,
     required this.onPlay,
     this.showGroup = false,
+    this.epgUrl,
   });
 
   final String title;
@@ -143,6 +145,7 @@ class ChannelList extends StatefulWidget {
   final ScrollController scrollController;
   final ValueChanged<Channel> onPlay;
   final bool showGroup;
+  final String? epgUrl;
 
   @override
   State<ChannelList> createState() => _ChannelListState();
@@ -178,6 +181,8 @@ class _ChannelListState extends State<ChannelList> {
   @override
   Widget build(BuildContext context) {
     final channels = widget.channels;
+    final hasEpg = widget.epgUrl != null && widget.epgUrl!.isNotEmpty;
+    final rowHeight = hasEpg ? channelRowHeightWithEpg : channelRowHeight;
     return Container(
       decoration: const BoxDecoration(
         color: AppColors.surface,
@@ -216,7 +221,7 @@ class _ChannelListState extends State<ChannelList> {
                 controller: widget.scrollController,
                 itemCount: channels.length,
                 // Fixed row height makes scrollbar dragging O(1) and exact.
-                itemExtent: channelRowHeight,
+                itemExtent: rowHeight,
                 itemBuilder: (context, index) {
                   final channel = channels[index];
                   final selectedChannel = widget.selected?.url == channel.url;
@@ -226,6 +231,8 @@ class _ChannelListState extends State<ChannelList> {
                     loadLogo: !_scrolling,
                     measurePing: !_scrolling,
                     showGroup: widget.showGroup,
+                    epgUrl: hasEpg ? widget.epgUrl : null,
+                    rowHeight: rowHeight,
                     onTap: () => widget.onPlay(channel),
                   );
                 },
@@ -245,7 +252,9 @@ class _ChannelTile extends StatelessWidget {
     required this.loadLogo,
     required this.measurePing,
     required this.onTap,
+    required this.rowHeight,
     this.showGroup = false,
+    this.epgUrl,
   });
 
   final Channel channel;
@@ -253,17 +262,22 @@ class _ChannelTile extends StatelessWidget {
   final bool loadLogo;
   final bool measurePing;
   final bool showGroup;
+  final String? epgUrl;
+  final double rowHeight;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
+    // While searching we show the group label instead of EPG (results span
+    // groups), so the guide line only appears in the normal browsing view.
+    final showEpg = epgUrl != null && !showGroup;
     return Material(
       color: selected ? AppColors.selected : Colors.transparent,
       child: InkWell(
         onTap: onTap,
         hoverColor: AppColors.surfaceMuted,
         child: Container(
-          height: channelRowHeight,
+          height: rowHeight,
           decoration: const BoxDecoration(
             border: Border(
               bottom: BorderSide(color: AppColors.border, width: 1),
@@ -295,7 +309,7 @@ class _ChannelTile extends StatelessWidget {
                         Flexible(
                           child: Text(
                             channel.name,
-                            maxLines: showGroup ? 1 : 2,
+                            maxLines: (showGroup || showEpg) ? 1 : 2,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
                               fontWeight: FontWeight.w700,
@@ -316,7 +330,8 @@ class _ChannelTile extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(color: AppColors.textMuted),
                       ),
-                    ],
+                    ] else if (showEpg)
+                      ChannelEpgLine(channel: channel, epgUrl: epgUrl),
                   ],
                 ),
               ),

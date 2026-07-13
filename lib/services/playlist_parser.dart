@@ -8,16 +8,28 @@ import 'package:http/http.dart' as http;
 import '../constants.dart';
 import '../models/playlist.dart';
 
-List<Channel> parsePlaylist(String text) {
+/// Parsed result of a playlist: its channels plus an optional EPG (XMLTV) URL
+/// declared in the M3U header (`url-tvg` / `x-tvg-url`).
+class ParsedPlaylist {
+  const ParsedPlaylist({required this.channels, this.epgUrl});
+  final List<Channel> channels;
+  final String? epgUrl;
+}
+
+ParsedPlaylist parsePlaylist(String text) {
   final lines = const LineSplitter()
       .convert(text)
       .map((line) => line.trim())
       .toList();
-  if (_looksLikeTxtPlaylist(lines)) return _parseTxtPlaylist(lines);
+  if (_looksLikeTxtPlaylist(lines)) {
+    return ParsedPlaylist(channels: _parseTxtPlaylist(lines));
+  }
   final channels = <Channel>[];
+  String? epgUrl;
   var pendingName = '';
   var pendingGroup = ungroupedGroup;
   String? pendingLogo;
+  String? pendingTvgId;
   String? extGrp;
   String? pendingManifestType;
   String? pendingLicenseType;
@@ -27,6 +39,7 @@ List<Channel> parsePlaylist(String text) {
     pendingName = '';
     pendingGroup = ungroupedGroup;
     pendingLogo = null;
+    pendingTvgId = null;
     extGrp = null;
     pendingManifestType = null;
     pendingLicenseType = null;
@@ -34,7 +47,16 @@ List<Channel> parsePlaylist(String text) {
   }
 
   for (final line in lines) {
-    if (line.isEmpty || line == '#EXTM3U') continue;
+    if (line.isEmpty) continue;
+    if (line.startsWith('#EXTM3U')) {
+      // The header can carry the guide URL, e.g.
+      //   #EXTM3U url-tvg="http://.../epg.xml" x-tvg-url="..."
+      epgUrl ??=
+          _attrFromExtInf(line, 'url-tvg') ??
+          _attrFromExtInf(line, 'x-tvg-url') ??
+          _attrFromExtInf(line, 'tvg-url');
+      continue;
+    }
     if (line.startsWith('#EXTGRP:')) {
       extGrp = line.substring('#EXTGRP:'.length).trim();
       continue;
@@ -65,6 +87,7 @@ List<Channel> parsePlaylist(String text) {
       pendingGroup =
           _attrFromExtInf(line, 'group-title') ?? extGrp ?? ungroupedGroup;
       pendingLogo = _attrFromExtInf(line, 'tvg-logo');
+      pendingTvgId = _attrFromExtInf(line, 'tvg-id');
       continue;
     }
     if (!line.startsWith('#')) {
@@ -76,6 +99,7 @@ List<Channel> parsePlaylist(String text) {
               ? ungroupedGroup
               : pendingGroup.trim(),
           logo: pendingLogo,
+          tvgId: (pendingTvgId?.trim().isEmpty ?? true) ? null : pendingTvgId,
           manifestType: pendingManifestType,
           licenseType: pendingLicenseType,
           licenseKey: pendingLicenseKey,
@@ -84,7 +108,10 @@ List<Channel> parsePlaylist(String text) {
       resetPending();
     }
   }
-  return channels;
+  return ParsedPlaylist(
+    channels: channels,
+    epgUrl: (epgUrl?.trim().isEmpty ?? true) ? null : epgUrl!.trim(),
+  );
 }
 
 /// Detects the "txt" playlist format common in Chinese IPTV lists (diyp/TVBox
