@@ -313,115 +313,171 @@ class SourceTile extends StatelessWidget {
   final VoidCallback onDelete;
   final bool isRefreshing;
 
+  String get _kindLabel => switch (source.kind) {
+    SourceKind.local => 'Local File',
+    SourceKind.online => 'Online Link',
+    SourceKind.single => 'Quick Test',
+  };
+
+  IconData get _kindIcon => switch (source.kind) {
+    SourceKind.local => Icons.folder_open_rounded,
+    SourceKind.online => Icons.link_rounded,
+    SourceKind.single => Icons.play_circle_outline_rounded,
+  };
+
   @override
   Widget build(BuildContext context) {
     return Material(
       color: Colors.transparent,
-      borderRadius: BorderRadius.circular(12),
+      borderRadius: BorderRadius.circular(10),
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         hoverColor: AppColors.surfaceMuted,
         child: Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
             color: AppColors.surface,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(color: AppColors.border, width: 1),
             boxShadow: cardShadow(),
           ),
           child: Row(
             children: [
-              const AppLogo(size: 48),
-              const SizedBox(width: 14),
+              const AppLogo(size: 38),
+              const SizedBox(width: 12),
               Expanded(
-                child: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 10,
-                  runSpacing: 8,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 360),
-                      child: Text(
-                        source.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w800,
-                          color: AppColors.textPrimary,
-                        ),
+                    Text(
+                      source.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                        height: 1.2,
                       ),
                     ),
-                    Tag(
-                      label: switch (source.kind) {
-                        SourceKind.local => 'Local File',
-                        SourceKind.online => 'Online Link',
-                        SourceKind.single => 'Quick Test',
-                      },
-                    ),
-                    if (source.cached) const Tag(label: 'Cached', green: true),
-                    Text(
-                      '${source.channels.length} channels',
-                      style: const TextStyle(color: AppColors.textMuted),
+                    const SizedBox(height: 3),
+                    Row(
+                      children: [
+                        Icon(_kindIcon, size: 13, color: AppColors.textMuted),
+                        const SizedBox(width: 5),
+                        Flexible(
+                          child: Text(
+                            _kindLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: AppColors.textSecondary,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        _Dot(),
+                        Text(
+                          '${source.channels.length} channels',
+                          style: const TextStyle(
+                            color: AppColors.textMuted,
+                            fontSize: 12,
+                          ),
+                        ),
+                        if (source.cached) ...[
+                          const SizedBox(width: 8),
+                          const Tag(label: 'Cached', green: true),
+                        ],
+                      ],
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Wrap(
-                spacing: 2,
-                children: [
-                  if (onRefresh != null)
-                    IconButton(
-                      constraints: const BoxConstraints.tightFor(
-                        width: 38,
-                        height: 38,
-                      ),
-                      padding: EdgeInsets.zero,
-                      color: AppColors.textSecondary,
-                      onPressed: isRefreshing ? null : onRefresh,
-                      icon: isRefreshing
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  AppColors.accent,
-                                ),
-                              ),
-                            )
-                          : const Icon(Icons.refresh_rounded),
-                    ),
-                  IconButton(
-                    constraints: const BoxConstraints.tightFor(
-                      width: 38,
-                      height: 38,
-                    ),
-                    padding: EdgeInsets.zero,
-                    color: AppColors.textSecondary,
-                    onPressed: onRename,
-                    icon: const Icon(Icons.edit_rounded),
-                  ),
-                  IconButton(
-                    constraints: const BoxConstraints.tightFor(
-                      width: 38,
-                      height: 38,
-                    ),
-                    padding: EdgeInsets.zero,
-                    onPressed: onDelete,
-                    icon: const Icon(
-                      Icons.delete_rounded,
-                      color: AppColors.danger,
-                    ),
-                  ),
-                ],
+              const SizedBox(width: 6),
+              if (onRefresh != null)
+                _TileAction(
+                  icon: Icons.refresh_rounded,
+                  tooltip: 'Refresh',
+                  color: AppColors.textSecondary,
+                  onPressed: isRefreshing ? null : onRefresh,
+                  busy: isRefreshing,
+                ),
+              _TileAction(
+                icon: Icons.edit_rounded,
+                tooltip: 'Rename',
+                color: AppColors.textSecondary,
+                onPressed: onRename,
+              ),
+              _TileAction(
+                icon: Icons.delete_rounded,
+                tooltip: 'Delete',
+                color: AppColors.danger,
+                onPressed: onDelete,
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+}
+
+/// Small separator dot between metadata pieces.
+class _Dot extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 8),
+      width: 3,
+      height: 3,
+      decoration: const BoxDecoration(
+        color: AppColors.textMuted,
+        shape: BoxShape.circle,
+      ),
+    );
+  }
+}
+
+/// Compact 32px icon action used in the source tile trailing row.
+class _TileAction extends StatelessWidget {
+  const _TileAction({
+    required this.icon,
+    required this.tooltip,
+    required this.color,
+    required this.onPressed,
+    this.busy = false,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final Color color;
+  final VoidCallback? onPressed;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+      padding: EdgeInsets.zero,
+      iconSize: 18,
+      splashRadius: 18,
+      hoverColor: AppColors.surfaceMuted,
+      tooltip: tooltip,
+      color: color,
+      onPressed: onPressed,
+      icon: busy
+          ? const SizedBox(
+              width: 16,
+              height: 16,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                valueColor: AlwaysStoppedAnimation<Color>(AppColors.accent),
+              ),
+            )
+          : Icon(icon),
     );
   }
 }

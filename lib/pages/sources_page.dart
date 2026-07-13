@@ -262,7 +262,7 @@ class SourcesPage extends StatelessWidget {
                     ),
                   )
                 : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
                     itemBuilder: (context, index) {
                       final source = sources.sources[index];
                       return SourceTile(
@@ -278,7 +278,7 @@ class SourcesPage extends StatelessWidget {
                         onDelete: () => _deleteSource(context, source),
                       );
                     },
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
+                    separatorBuilder: (_, _) => const SizedBox(height: 8),
                     itemCount: sources.sources.length,
                   ),
           ),
