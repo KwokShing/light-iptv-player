@@ -1,5 +1,6 @@
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../controllers/playback_controller.dart';
@@ -123,6 +124,50 @@ class SourcesPage extends StatelessWidget {
     );
   }
 
+  /// VLC-style Ctrl+V: read a stream URL from the clipboard, then open the
+  /// player and start playing it immediately.
+  Future<void> _pasteAndPlay(BuildContext context) async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!context.mounted) return;
+    final url = data?.text?.trim() ?? '';
+    final uri = Uri.tryParse(url);
+    final isPlayable =
+        url.isNotEmpty &&
+        uri != null &&
+        uri.hasScheme &&
+        (uri.isScheme('http') ||
+            uri.isScheme('https') ||
+            uri.isScheme('rtmp') ||
+            uri.isScheme('rtsp') ||
+            uri.isScheme('udp') ||
+            uri.isScheme('file'));
+    if (!isPlayable) {
+      _showMessage(context, 'Clipboard does not contain a playable URL');
+      return;
+    }
+
+    final name = uri.pathSegments.isNotEmpty && uri.pathSegments.last.isNotEmpty
+        ? uri.pathSegments.last
+        : (uri.host.isNotEmpty ? uri.host : 'Pasted URL');
+    final channel = Channel(name: name, url: url, group: 'Quick Test');
+    final source = PlaylistSource(
+      id: newSourceId(),
+      name: name,
+      kind: SourceKind.single,
+      source: url,
+      channels: [channel],
+      cached: true,
+    );
+
+    final sources = context.read<SourcesController>();
+    final ui = context.read<UiController>();
+    final playback = context.read<PlaybackController>();
+    await sources.upsert(source);
+    await playback.stopPlayback();
+    ui.openSource(source);
+    await playback.play(channel);
+  }
+
   Future<void> _renameSource(BuildContext context, PlaylistSource source) async {
     final sources = context.read<SourcesController>();
     final result = await showEditSourceDialog(context, source: source);
@@ -201,88 +246,105 @@ class SourcesPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final sources = context.watch<SourcesController>();
     final update = context.watch<UpdateController>();
-    return Scaffold(
-      backgroundColor: AppColors.bg,
-      body: Column(
-        children: [
-          TopBar(
-            title: 'Light IPTV Player',
-            subtitle: '${sources.sources.length} sources',
-            showLogo: false,
-            trailing: [
-              _AddSourceButton(
-                onLocal: () => _addLocalSource(context),
-                onOnline: () => _addOnlineSource(context),
-                onSingle: () => _addSingleChannel(context),
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+            _pasteAndPlay(context),
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          backgroundColor: AppColors.bg,
+          body: Column(
+            children: [
+              TopBar(
+                title: 'Light IPTV Player',
+                subtitle: '${sources.sources.length} sources',
+                showLogo: false,
+                trailing: [
+                  _AddSourceButton(
+                    onLocal: () => _addLocalSource(context),
+                    onOnline: () => _addOnlineSource(context),
+                    onSingle: () => _addSingleChannel(context),
+                  ),
+                  const SizedBox(width: 10),
+                  TopBarButton(
+                    icon: Icons.refresh_rounded,
+                    label: 'Refresh All',
+                    busy: sources.refreshingAll,
+                    onPressed: sources.refreshingAll ? null : sources.refreshAll,
+                  ),
+                  const SizedBox(width: 10),
+                  const ProxyButton(),
+                ],
               ),
-              const SizedBox(width: 10),
-              TopBarButton(
-                icon: Icons.refresh_rounded,
-                label: 'Refresh All',
-                busy: sources.refreshingAll,
-                onPressed: sources.refreshingAll ? null : sources.refreshAll,
+              if (update.availableUpdate != null) ...[
+                const SizedBox(height: 12),
+                _UpdateBanner(update: update),
+              ],
+              Expanded(
+                child: sources.sources.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 64,
+                              height: 64,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: AppColors.accentSoft,
+                                border: Border.all(color: AppColors.accentBorder),
+                              ),
+                              child: const Icon(
+                                Icons.playlist_add_rounded,
+                                color: AppColors.accent,
+                                size: 30,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            const Text(
+                              'Create a source to start watching.',
+                              style: TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 15,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            const Text(
+                              'Tip: press Ctrl+V to play a copied stream URL.',
+                              style: TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.separated(
+                        padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+                        itemBuilder: (context, index) {
+                          final source = sources.sources[index];
+                          return SourceTile(
+                            source: source,
+                            onOpen: () => _openSource(context, source),
+                            onRefresh: source.kind == SourceKind.single
+                                ? null
+                                : () => sources.refreshOne(source),
+                            isRefreshing: sources.refreshingSourceIds.contains(
+                              source.id,
+                            ),
+                            onRename: () => _renameSource(context, source),
+                            onDelete: () => _deleteSource(context, source),
+                          );
+                        },
+                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        itemCount: sources.sources.length,
+                      ),
               ),
-              const SizedBox(width: 10),
-              const ProxyButton(),
             ],
           ),
-          if (update.availableUpdate != null) ...[
-            const SizedBox(height: 12),
-            _UpdateBanner(update: update),
-          ],
-          Expanded(
-            child: sources.sources.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          width: 64,
-                          height: 64,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: AppColors.accentSoft,
-                            border: Border.all(color: AppColors.accentBorder),
-                          ),
-                          child: const Icon(
-                            Icons.playlist_add_rounded,
-                            color: AppColors.accent,
-                            size: 30,
-                          ),
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          'Create a source to start watching.',
-                          style: TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 15,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
-                : ListView.separated(
-                    padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
-                    itemBuilder: (context, index) {
-                      final source = sources.sources[index];
-                      return SourceTile(
-                        source: source,
-                        onOpen: () => _openSource(context, source),
-                        onRefresh: source.kind == SourceKind.single
-                            ? null
-                            : () => sources.refreshOne(source),
-                        isRefreshing: sources.refreshingSourceIds.contains(
-                          source.id,
-                        ),
-                        onRename: () => _renameSource(context, source),
-                        onDelete: () => _deleteSource(context, source),
-                      );
-                    },
-                    separatorBuilder: (_, _) => const SizedBox(height: 8),
-                    itemCount: sources.sources.length,
-                  ),
-          ),
-        ],
+        ),
       ),
     );
   }
