@@ -8,6 +8,7 @@ import '../controllers/sources_controller.dart';
 import '../controllers/ui_controller.dart';
 import '../controllers/update_controller.dart';
 import '../models/playlist.dart';
+import '../services/paste_to_play.dart';
 import '../services/playlist_parser.dart';
 import '../theme.dart';
 import '../widgets/proxy_button.dart';
@@ -151,50 +152,6 @@ class _SourcesPageState extends State<SourcesPage> {
     );
   }
 
-  /// VLC-style Ctrl+V: read a stream URL from the clipboard, then open the
-  /// player and start playing it immediately.
-  Future<void> _pasteAndPlay(BuildContext context) async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    if (!context.mounted) return;
-    final url = data?.text?.trim() ?? '';
-    final uri = Uri.tryParse(url);
-    final isPlayable =
-        url.isNotEmpty &&
-        uri != null &&
-        uri.hasScheme &&
-        (uri.isScheme('http') ||
-            uri.isScheme('https') ||
-            uri.isScheme('rtmp') ||
-            uri.isScheme('rtsp') ||
-            uri.isScheme('udp') ||
-            uri.isScheme('file'));
-    if (!isPlayable) {
-      _showMessage(context, 'Clipboard does not contain a playable URL');
-      return;
-    }
-
-    final name = uri.pathSegments.isNotEmpty && uri.pathSegments.last.isNotEmpty
-        ? uri.pathSegments.last
-        : (uri.host.isNotEmpty ? uri.host : 'Pasted URL');
-    final channel = Channel(name: name, url: url, group: 'Quick Test');
-    final source = PlaylistSource(
-      id: newSourceId(),
-      name: name,
-      kind: SourceKind.single,
-      source: url,
-      channels: [channel],
-      cached: true,
-    );
-
-    final sources = context.read<SourcesController>();
-    final ui = context.read<UiController>();
-    final playback = context.read<PlaybackController>();
-    await sources.upsert(source);
-    await playback.stopPlayback();
-    ui.openTemporarySource(source);
-    await playback.play(channel);
-  }
-
   Future<void> _renameSource(BuildContext context, PlaylistSource source) async {
     final sources = context.read<SourcesController>();
     final result = await showEditSourceDialog(context, source: source);
@@ -279,7 +236,7 @@ class _SourcesPageState extends State<SourcesPage> {
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
-            _pasteAndPlay(context),
+            pasteAndPlay(context),
       },
       child: Focus(
         focusNode: _focusNode,

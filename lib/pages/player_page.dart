@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:provider/provider.dart';
 
@@ -8,6 +9,7 @@ import '../controllers/playback_controller.dart';
 import '../controllers/sources_controller.dart';
 import '../controllers/ui_controller.dart';
 import '../models/playlist.dart';
+import '../services/paste_to_play.dart';
 import '../theme.dart';
 import '../widgets/channel_list.dart';
 import '../widgets/debug_log_sidebar.dart';
@@ -72,7 +74,9 @@ class _PlayerPageState extends State<PlayerPage> {
     final visibleChannels = ui.visibleChannels(source);
     final fullscreen = playback.fullscreen;
 
-    return Focus(
+    final isTemporary = ui.temporarySourceId == source.id;
+
+    final player = Focus(
       focusNode: playback.playerFocusNode,
       autofocus: true,
       onKeyEvent: playback.handleKeyEvent,
@@ -374,6 +378,17 @@ class _PlayerPageState extends State<PlayerPage> {
           ),
         ),
       ),
+    );
+
+    if (!isTemporary) return player;
+    // While viewing the throwaway paste source, Ctrl+V swaps the stream in
+    // place instead of leaving the player.
+    return CallbackShortcuts(
+      bindings: {
+        const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
+            pasteAndReplace(context, source),
+      },
+      child: player,
     );
   }
 
