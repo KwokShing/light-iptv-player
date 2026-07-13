@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../constants.dart';
 import '../models/playlist.dart';
 import '../theme.dart';
 import 'common.dart';
@@ -73,50 +74,54 @@ class PlaybackControls extends StatelessWidget {
               // Info line: channel name, inline EPG now/next, and the current
               // stream URL (horizontally scrollable) with a copy button — all
               // on one row so the card stays short and the video pane is large.
-              if (hasChannel && (nowPlaying?.name.isNotEmpty ?? false))
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Row(
-                    children: [
-                      ConstrainedBox(
-                        constraints: const BoxConstraints(maxWidth: 220),
-                        child: Text(
-                          nowPlaying!.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w800,
-                            color: AppColors.textPrimary,
+              // The row's height is always reserved (even before playback) so
+              // the bar — and thus the video pane's height — never changes when
+              // a channel starts playing.
+              SizedBox(
+                height: transportInfoLineHeight,
+                child: (hasChannel && (nowPlaying?.name.isNotEmpty ?? false))
+                    ? Row(
+                        children: [
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 220),
+                            child: Text(
+                              nowPlaying!.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
-                      if (hasEpg) ...[
-                        const SizedBox(width: 10),
-                        Container(
-                          width: 1,
-                          height: 14,
-                          color: AppColors.border,
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: NowNextInline(
-                            channel: nowPlaying!,
-                            epgUrl: epgUrl,
-                          ),
-                        ),
-                      ] else
-                        const Spacer(),
-                      if (streamUrlController.text.isNotEmpty) ...[
-                        const SizedBox(width: 10),
-                        SizedBox(
-                          width: 320,
-                          child: _StreamUrlBar(url: streamUrlController.text),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+                          if (hasEpg) ...[
+                            const SizedBox(width: 10),
+                            Container(
+                              width: 1,
+                              height: 14,
+                              color: AppColors.border,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: NowNextInline(
+                                channel: nowPlaying!,
+                                epgUrl: epgUrl,
+                              ),
+                            ),
+                          ] else
+                            const Spacer(),
+                          if (streamUrlController.text.isNotEmpty) ...[
+                            const SizedBox(width: 10),
+                            SizedBox(
+                              width: 320,
+                              child: _StreamUrlBar(url: streamUrlController.text),
+                            ),
+                          ],
+                        ],
+                      )
+                    : const SizedBox.shrink(),
+              ),
               // Control line: transport buttons, volume, seek bar and the
               // status/action cluster — a single horizontal row.
               Row(

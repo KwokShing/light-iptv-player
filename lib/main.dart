@@ -12,6 +12,7 @@ import 'controllers/proxy_controller.dart';
 import 'controllers/sources_controller.dart';
 import 'controllers/ui_controller.dart';
 import 'controllers/update_controller.dart';
+import 'constants.dart';
 import 'pages/player_page.dart';
 import 'pages/sources_page.dart';
 import 'services/proxy_service.dart';
@@ -42,10 +43,12 @@ Future<void> main() async {
     const WindowOptions(
       title: 'Light IPTV Player',
       // Sized so the video pane (window minus the fixed 440px side columns and
-      // the top/transport chrome) sits at ~16:9, so a 16:9 stream fills it with
-      // minimal letterboxing on any side.
-      size: Size(1500, 725),
-      minimumSize: Size(1180, 672),
+      // the top/transport chrome) sits at exactly 16:9, so a 16:9 stream fills
+      // it with no letterboxing. Derived from layout constants — see
+      // constants.dart. Because the transport info line is always reserved, the
+      // pane keeps this ratio before and after playback starts.
+      size: Size(defaultWindowWidth, defaultWindowHeight),
+      minimumSize: Size(minWindowWidth, minWindowHeight),
       center: true,
     ),
     () async {
