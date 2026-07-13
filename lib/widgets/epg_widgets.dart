@@ -125,7 +125,18 @@ class NowNextInline extends StatelessWidget {
         final next = nowNext.next;
         if (nowNext.isEmpty) return const SizedBox.shrink();
 
-        return Row(
+        // Full details for the hover tooltip so a truncated title/next line can
+        // still be read in full.
+        final tooltipLines = <String>[
+          if (current != null)
+            'NOW  ${_formatClock(current.start.toLocal())}'
+                '–${_formatClock(current.stop.toLocal())}\n${current.title}',
+          if (next != null)
+            'NEXT  ${_formatClock(next.start.toLocal())}'
+                '–${_formatClock(next.stop.toLocal())}\n${next.title}',
+        ];
+
+        final row = Row(
           children: [
             if (current != null) ...[
               const _EpgDot(),
@@ -205,6 +216,23 @@ class NowNextInline extends StatelessWidget {
               ),
             ],
           ],
+        );
+
+        return Tooltip(
+          message: tooltipLines.join('\n\n'),
+          waitDuration: const Duration(milliseconds: 300),
+          margin: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.textPrimary,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          textStyle: const TextStyle(
+            color: Colors.white,
+            fontSize: 12.5,
+            height: 1.35,
+          ),
+          child: row,
         );
       },
     );

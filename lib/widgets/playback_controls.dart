@@ -251,16 +251,31 @@ class _StreamUrlBar extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         Expanded(
-          child: SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Text(
-              url,
-              maxLines: 1,
-              softWrap: false,
-              style: const TextStyle(
-                fontSize: 11.5,
-                color: AppColors.textMuted,
-                height: 1.1,
+          child: Tooltip(
+            message: url,
+            waitDuration: const Duration(milliseconds: 300),
+            margin: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppColors.textPrimary,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            textStyle: const TextStyle(
+              color: Colors.white,
+              fontSize: 12.5,
+              height: 1.35,
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Text(
+                url,
+                maxLines: 1,
+                softWrap: false,
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  color: AppColors.textMuted,
+                  height: 1.1,
+                ),
               ),
             ),
           ),
