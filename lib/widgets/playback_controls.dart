@@ -136,7 +136,7 @@ class PlaybackControls extends StatelessWidget {
                   ),
                   TransportButton(
                     icon: Icons.stop_rounded,
-                    tooltip: 'Stop (S)',
+                    tooltip: 'Stop',
                     onPressed: onStop,
                   ),
                   TransportButton(
@@ -151,7 +151,7 @@ class PlaybackControls extends StatelessWidget {
                         : volume < 50
                         ? Icons.volume_down_rounded
                         : Icons.volume_up_rounded,
-                    tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                    tooltip: muted ? 'Unmute' : 'Mute',
                     onPressed: onMute,
                   ),
                   SizedBox(
@@ -371,13 +371,13 @@ class FullscreenControls extends StatelessWidget {
                     ),
                     TransportButton(
                       icon: Icons.stop,
-                      tooltip: 'Stop (S)',
+                      tooltip: 'Stop',
                       onPressed: onStop,
                       color: Colors.white,
                     ),
                     TransportButton(
                       icon: muted ? Icons.volume_off : Icons.volume_up,
-                      tooltip: muted ? 'Unmute (M)' : 'Mute (M)',
+                      tooltip: muted ? 'Unmute' : 'Mute',
                       onPressed: onMute,
                       color: Colors.white,
                     ),
@@ -419,7 +419,7 @@ class FullscreenControls extends StatelessWidget {
                     ),
                     TransportButton(
                       icon: Icons.fullscreen_exit,
-                      tooltip: 'Exit fullscreen (F / Esc)',
+                      tooltip: 'Exit fullscreen (Esc)',
                       onPressed: onExitFullscreen,
                       color: Colors.white,
                     ),
@@ -469,7 +469,7 @@ class _RightControls extends StatelessWidget {
         ),
         TransportButton(
           icon: Icons.fullscreen_rounded,
-          tooltip: 'Fullscreen (F / double-click)',
+          tooltip: 'Fullscreen (double-click)',
           onPressed: onFullscreen,
         ),
       ],

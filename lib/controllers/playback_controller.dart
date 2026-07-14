@@ -1106,22 +1106,6 @@ class PlaybackController extends ChangeNotifier {
       togglePlayPause();
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.keyS) {
-      stopPlayback();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.keyM) {
-      toggleMute();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.keyD) {
-      toggleDeinterlace();
-      return KeyEventResult.handled;
-    }
-    if (key == LogicalKeyboardKey.keyF) {
-      if (!fullscreenChanging) toggleFullscreen();
-      return KeyEventResult.handled;
-    }
     if (key == LogicalKeyboardKey.arrowUp) {
       setVolume(volume + 5);
       return KeyEventResult.handled;
