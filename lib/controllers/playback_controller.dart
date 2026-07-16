@@ -46,6 +46,10 @@ class PlaybackController extends ChangeNotifier {
   // plain streams, or the proxy's local manifest for ClearKey DASH. Used by the
   // reconnect path so it reloads the right source.
   String _activeStreamUrl = '';
+  // Whether the currently active stream is HLS (an m3u8 manifest). Retained so
+  // the reconnect path re-applies the same lavf/HLS demuxer hint that play()
+  // set for the initial open.
+  bool _activeIsHls = false;
 
   final TextEditingController streamUrlController = TextEditingController();
   final FocusNode playerFocusNode = FocusNode();
@@ -416,15 +420,26 @@ class PlaybackController extends ChangeNotifier {
     } catch (_) {}
   }
 
-  // Returns false when the stream is a format the bundled libmpv can't open
-  // without crashing the whole process (currently MPEG-DASH). Fetches a small
-  // prefix with a short timeout so a healthy stream isn't delayed much, and
-  // returns true (play it) on any uncertainty so a flaky probe never blocks a
-  // good channel.
-  Future<bool> _isNativeSafeStream(String url) async {
+  // Sniffs a stream before it is handed to mpv, fetching a small prefix with a
+  // short timeout so a healthy stream isn't delayed much. On any uncertainty it
+  // returns a permissive result so a flaky probe never blocks a good channel.
+  //   nativeSafe is false only for MPEG-DASH, which the bundled libmpv's ffmpeg
+  //     can segfault on (a native crash we can't catch).
+  //   mediaUrl is the URL mpv should actually open: normally the origin URL,
+  //     but when the origin body is a plaintext M3U wrapper (a tiny text file
+  //     that just lists the real stream URL, not an HLS manifest) it is the
+  //     unwrapped inner URL, so mpv opens the media directly instead of running
+  //     its plaintext-playlist reader against a non-seekable live stream (which
+  //     floods the log with curl backward-seek errors and stalls playback).
+  //   isHls is true for a real HLS manifest, so the caller can force mpv's
+  //     lavf/HLS demuxer instead of letting mpv misdetect it as a plaintext
+  //     playlist.
+  Future<({bool nativeSafe, bool isHls, String? mediaUrl})> _probeStream(
+    String url,
+  ) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
-      return true;
+      return (nativeSafe: true, isHls: false, mediaUrl: null);
     }
     final client = http.Client();
     try {
@@ -450,10 +465,53 @@ class PlaybackController extends ChangeNotifier {
           contentType.contains('dash+xml') ||
           head.contains('<MPD') ||
           head.contains('urn:mpeg:dash');
-      return !looksDash;
+      if (looksDash) {
+        return (nativeSafe: false, isHls: false, mediaUrl: null);
+      }
+      // A real HLS manifest: #EXTM3U plus at least one #EXT-X- tag, or an
+      // mpegurl content type. These must be opened by mpv's HLS/lavf demuxer,
+      // NOT unwrapped and NOT read by mpv's dumb plaintext-playlist reader
+      // (which plays segments one-by-one and floods the log with curl
+      // backward-seek errors on a live sliding-window stream).
+      final trimmed = head.trimLeft();
+      final isHls =
+          (trimmed.startsWith('#EXTM3U') && head.contains('#EXT-X-')) ||
+          contentType.contains('mpegurl') ||
+          contentType.contains('vnd.apple.mpegurl');
+      if (isHls) {
+        return (nativeSafe: true, isHls: true, mediaUrl: null);
+      }
+      return (
+        nativeSafe: true,
+        isHls: false,
+        mediaUrl: _unwrapPlaintextPlaylist(head, uri),
+      );
     } finally {
       client.close();
     }
+  }
+
+  // If [head] is a plaintext M3U wrapper (an #EXTM3U/#EXTINF file whose only
+  // real content is a single stream URL), returns that inner URL resolved
+  // against [base]. Returns null for a genuine HLS manifest (any #EXT-X- tag)
+  // so mpv opens those itself and its HLS demuxer runs, and for anything that
+  // isn't a plaintext playlist at all.
+  String? _unwrapPlaintextPlaylist(String head, Uri base) {
+    if (!head.trimLeft().startsWith('#EXTM3U')) return null;
+    if (head.contains('#EXT-X-')) return null;
+    for (final raw in const LineSplitter().convert(head)) {
+      final line = raw.trim();
+      if (line.isEmpty || line.startsWith('#')) continue;
+      final resolved = base.resolve(line);
+      if (resolved.isScheme('http') ||
+          resolved.isScheme('https') ||
+          resolved.isScheme('rtsp') ||
+          resolved.isScheme('rtmp')) {
+        return resolved.toString();
+      }
+      return null;
+    }
+    return null;
   }
 
   Future<void> play(Channel channel) async {
@@ -538,16 +596,30 @@ class PlaybackController extends ChangeNotifier {
 
     // The bundled libmpv's ffmpeg segfaults the whole process on some
     // MPEG-DASH manifests (a native crash we can't catch). Sniff the response
-    // first: if it's DASH, don't hand it to mpv. Best-effort; a probe failure
-    // falls through to a normal open so healthy streams are never blocked.
+    // first: if it's DASH, don't hand it to mpv. The same probe also unwraps a
+    // plaintext M3U wrapper to its inner media URL so mpv never runs its
+    // playlist reader against a non-seekable live stream. Best-effort; a probe
+    // failure falls through to a normal open so healthy streams are never
+    // blocked.
     //
     // Skip the guard for streams we deliberately open: DASH declared via
     // #KODIPROP (played through the ClearKey proxy) and the proxy's own local
     // manifest.
     var nativeSafe = true;
-    if (!channel.isDash) {
+    var isHls = false;
+    if (!channel.isDash && !channel.isEncryptedDash) {
       try {
-        nativeSafe = await _isNativeSafeStream(channel.url);
+        final probe = await _probeStream(channel.url);
+        nativeSafe = probe.nativeSafe;
+        isHls = probe.isHls;
+        if (probe.mediaUrl != null && probe.mediaUrl != streamUrl) {
+          debugPrint('Unwrapped plaintext playlist -> ${probe.mediaUrl}');
+          DebugLogService.instance.add(
+            'Unwrapped playlist wrapper to inner stream URL',
+            source: 'app',
+          );
+          streamUrl = probe.mediaUrl!;
+        }
       } catch (_) {}
     }
     if (_disposed || request != playbackRequest) return;
@@ -561,7 +633,8 @@ class PlaybackController extends ChangeNotifier {
     }
 
     _activeStreamUrl = streamUrl;
-    await _applyPlaybackOptions();
+    _activeIsHls = isHls;
+    await _applyPlaybackOptions(isHls: isHls);
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
     _engineDirty = true;
@@ -674,7 +747,7 @@ class PlaybackController extends ChangeNotifier {
     );
     try {
       if (_reconnectAttempts > 1) {
-        await _applyPlaybackOptions();
+        await _applyPlaybackOptions(isHls: _activeIsHls);
         if (_disposed || request != playbackRequest) return;
       }
       final platform = player.platform;
@@ -713,6 +786,7 @@ class PlaybackController extends ChangeNotifier {
     _ytdlGraceTimer?.cancel();
     _ytdlGraceTimer = null;
     _activeStreamUrl = '';
+    _activeIsHls = false;
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
     streamUrlController.clear();
@@ -884,7 +958,7 @@ class PlaybackController extends ChangeNotifier {
     return '${kbps.toStringAsFixed(0)} Kbps';
   }
 
-  Future<void> _applyPlaybackOptions() async {
+  Future<void> _applyPlaybackOptions({bool isHls = false}) async {
     final platform = player.platform;
     if (platform == null) return;
 
@@ -897,6 +971,20 @@ class PlaybackController extends ChangeNotifier {
       'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
+      // youtube-dl / yt-dlp is not bundled with the app, so mpv's ytdl_hook can
+      // never succeed. Left enabled it hijacks every failed open, spends the
+      // 20s ytdl grace period trying to spawn a missing binary, and floods the
+      // log with "youtube-dl failed: not found". Turn it off so a failed stream
+      // fails fast and cleanly.
+      'ytdl': 'no',
+      // Force ffmpeg's demuxer for HLS. Given only an m3u8 URL, mpv otherwise
+      // hands it to its native `playlist` demuxer (logged as "Reading plaintext
+      // playlist"), which plays the media-playlist segments one at a time and,
+      // on a live sliding-window stream, floods the log with "curl: Cannot seek
+      // backward in linear streams!" and stalls. lavf runs ffmpeg's real HLS
+      // demuxer, which follows the live playlist correctly. Cleared (empty =
+      // auto) for non-HLS streams so their own format detection is untouched.
+      'demuxer': isHls ? 'lavf' : '',
       // Deinterlacing is handled via an explicit video filter (see
       // _applyDeinterlaceFilter), applied after the option loop so the filter
       // string can be swapped live without a reload. Nothing to set here.
