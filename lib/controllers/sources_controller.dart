@@ -134,7 +134,11 @@ class SourcesController extends ChangeNotifier {
   Future<void> refreshAll() async {
     if (_refreshingAll) return;
     final reloadable = _sources
-        .where((source) => source.kind != SourceKind.single)
+        .where(
+          (source) =>
+              source.kind != SourceKind.single &&
+              source.kind != SourceKind.media,
+        )
         .toList();
     if (reloadable.isEmpty) {
       _message('No playlists to refresh');

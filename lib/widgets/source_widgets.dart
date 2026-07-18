@@ -57,9 +57,7 @@ Future<SourceDialogResult?> showSourceDialog(
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          style: TextButton.styleFrom(
-            foregroundColor: AppColors.textSecondary,
-          ),
+          style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
           child: const Text('Cancel'),
         ),
         FilledButton(
@@ -136,35 +134,46 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
 
   Future<void> _pickFile() async {
     try {
+      final isMedia = widget.source.kind == SourceKind.media;
       final result = await FilePicker.pickFiles(
-        dialogTitle: 'Load M3U File',
+        dialogTitle: isMedia ? 'Load MMT/TLV Media' : 'Load M3U File',
         type: FileType.custom,
-        allowedExtensions: const ['m3u', 'm3u8', 'txt'],
+        allowedExtensions: isMedia
+            ? const ['mmt', 'mmts', 'tlv']
+            : const ['m3u', 'm3u8', 'txt'],
         lockParentWindow: true,
       );
       final files = result?.files;
       if (files == null || files.isEmpty) return;
       final file = files.first;
+      final path = file.path ?? file.name;
 
-      final bytes = await file.readAsBytes();
-      final text = await decodePlaylistBytes(bytes);
-      final parsed = parsePlaylist(text);
-      if (parsed.channels.isEmpty) return;
+      List<Channel> channels;
+      String? epgUrl;
+      if (isMedia) {
+        channels = [
+          Channel(name: widget.source.name, url: path, group: 'Local Media'),
+        ];
+      } else {
+        final text = await decodePlaylistBytes(await file.readAsBytes());
+        final parsed = parsePlaylist(text);
+        if (parsed.channels.isEmpty) return;
+        channels = parsed.channels;
+        epgUrl = parsed.epgUrl;
+      }
       if (!mounted) return;
       Navigator.pop(
         context,
-        EditSourceResultFile(
-          file.path ?? file.name,
-          parsed.channels,
-          epgUrl: parsed.epgUrl,
-        ),
+        EditSourceResultFile(path, channels, epgUrl: epgUrl),
       );
     } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
-    final isLocal = widget.source.kind == SourceKind.local;
+    final isLocalPlaylist = widget.source.kind == SourceKind.local;
+    final isMedia = widget.source.kind == SourceKind.media;
+    final isFile = isLocalPlaylist || isMedia;
     return AlertDialog(
       title: const Text(
         'Edit Source',
@@ -186,7 +195,7 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
                 ),
               ),
             ),
-            if (!isLocal) ...[
+            if (!isFile) ...[
               const SizedBox(height: 12),
               TextField(
                 controller: urlController,
@@ -199,7 +208,7 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
                 ),
               ),
             ],
-            if (isLocal) ...[
+            if (isFile) ...[
               const SizedBox(height: 16),
               Align(
                 alignment: Alignment.centerLeft,
@@ -209,7 +218,11 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
                     foregroundColor: AppColors.accent,
                   ),
                   icon: const Icon(Icons.folder_open_rounded),
-                  label: const Text('Load different M3U file'),
+                  label: Text(
+                    isMedia
+                        ? 'Load different MMT/TLV file'
+                        : 'Load different M3U file',
+                  ),
                 ),
               ),
             ],
@@ -219,9 +232,7 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          style: TextButton.styleFrom(
-            foregroundColor: AppColors.textSecondary,
-          ),
+          style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
           child: const Text('Cancel'),
         ),
         FilledButton(
@@ -231,7 +242,7 @@ class _EditSourceDialogState extends State<_EditSourceDialog> {
             final url = urlController.text.trim();
             final nameChanged = name.isNotEmpty && name != widget.source.name;
             final urlChanged =
-                !isLocal && url.isNotEmpty && url != widget.source.source;
+                !isFile && url.isNotEmpty && url != widget.source.source;
             if (urlChanged) {
               Navigator.pop(
                 context,
@@ -314,15 +325,17 @@ class SourceTile extends StatelessWidget {
   final bool isRefreshing;
 
   String get _kindLabel => switch (source.kind) {
-    SourceKind.local => 'Local File',
+    SourceKind.local => 'Local Playlist',
     SourceKind.online => 'Online Link',
     SourceKind.single => 'Quick Test',
+    SourceKind.media => 'Local MMT/TLV',
   };
 
   IconData get _kindIcon => switch (source.kind) {
     SourceKind.local => Icons.folder_open_rounded,
     SourceKind.online => Icons.link_rounded,
     SourceKind.single => Icons.play_circle_outline_rounded,
+    SourceKind.media => Icons.video_file_rounded,
   };
 
   @override

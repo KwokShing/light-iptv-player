@@ -270,3 +270,103 @@ else()
   message(WARNING "No zhongfly libmpv-2.dll available; "
     "using media_kit's bundled (non-DASH) build.")
 endif()
+
+# === MMT/TLV to MPEG-TS converter (Windows x64) ===
+# FFmpeg/libmpv has no ARIB MMT/TLV demuxer. dantto4k's latest Windows CI
+# artifact supports already-descrambled HTTP streams; the v1.0.2-rc1 release
+# does not yet recognize --frontend-descrambled. Resolve the newest artifact
+# metadata from GitHub, download it through nightly.link (GitHub's artifact
+# endpoint requires authentication), and verify it against GitHub's SHA-256.
+set(DANTTO4K_DIR "${CMAKE_BINARY_DIR}/dantto4k")
+set(DANTTO4K_EXE "${DANTTO4K_DIR}/dantto4k.exe")
+set(DANTTO4K_STAMP "${DANTTO4K_DIR}/.artifact-id")
+set(DANTTO4K_LICENSE "${DANTTO4K_DIR}/LICENSE.txt")
+set(DANTTO4K_API_JSON "${CMAKE_BINARY_DIR}/dantto4k-artifacts.json")
+set(DANTTO4K_API_URL
+  "https://api.github.com/repos/nekohkr/dantto4k/actions/artifacts?name=dantto4k-main-windows-x64&per_page=1")
+set(DANTTO4K_ARTIFACT_ID "")
+set(DANTTO4K_ARTIFACT_SHA256 "")
+
+if(NOT CMAKE_VERSION VERSION_LESS "3.19")
+  file(DOWNLOAD "${DANTTO4K_API_URL}" "${DANTTO4K_API_JSON}"
+    HTTPHEADER "Accept: application/vnd.github+json"
+    HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
+    TLS_VERIFY ON STATUS DANTTO4K_API_STATUS)
+  list(GET DANTTO4K_API_STATUS 0 DANTTO4K_API_CODE)
+  if(DANTTO4K_API_CODE EQUAL 0)
+    file(READ "${DANTTO4K_API_JSON}" DANTTO4K_API_RESPONSE)
+    string(JSON DANTTO4K_ARTIFACT_COUNT ERROR_VARIABLE DANTTO4K_JSON_ERROR
+      LENGTH "${DANTTO4K_API_RESPONSE}" artifacts)
+    if(DANTTO4K_JSON_ERROR STREQUAL "NOTFOUND"
+        AND DANTTO4K_ARTIFACT_COUNT GREATER 0)
+      string(JSON DANTTO4K_ARTIFACT_ID
+        GET "${DANTTO4K_API_RESPONSE}" artifacts 0 id)
+      string(JSON DANTTO4K_ARTIFACT_DIGEST
+        GET "${DANTTO4K_API_RESPONSE}" artifacts 0 digest)
+      string(REGEX REPLACE "^sha256:" "" DANTTO4K_ARTIFACT_SHA256
+        "${DANTTO4K_ARTIFACT_DIGEST}")
+    endif()
+  else()
+    message(WARNING "Failed to resolve the latest dantto4k artifact.")
+  endif()
+endif()
+
+set(DANTTO4K_CURRENT FALSE)
+if(NOT DANTTO4K_ARTIFACT_ID STREQUAL ""
+    AND EXISTS "${DANTTO4K_EXE}" AND EXISTS "${DANTTO4K_STAMP}")
+  file(READ "${DANTTO4K_STAMP}" DANTTO4K_PREVIOUS_ID)
+  string(STRIP "${DANTTO4K_PREVIOUS_ID}" DANTTO4K_PREVIOUS_ID)
+  if(DANTTO4K_PREVIOUS_ID STREQUAL "${DANTTO4K_ARTIFACT_ID}")
+    set(DANTTO4K_CURRENT TRUE)
+  endif()
+endif()
+
+if(NOT DANTTO4K_ARTIFACT_ID STREQUAL "" AND NOT DANTTO4K_CURRENT)
+  set(DANTTO4K_ARCHIVE
+    "${CMAKE_BINARY_DIR}/dantto4k-${DANTTO4K_ARTIFACT_ID}.zip")
+  set(DANTTO4K_URL
+    "https://nightly.link/nekohkr/dantto4k/actions/artifacts/${DANTTO4K_ARTIFACT_ID}.zip")
+  file(DOWNLOAD "${DANTTO4K_URL}" "${DANTTO4K_ARCHIVE}"
+    EXPECTED_HASH SHA256=${DANTTO4K_ARTIFACT_SHA256}
+    TLS_VERIFY ON STATUS DANTTO4K_DOWNLOAD_STATUS)
+  list(GET DANTTO4K_DOWNLOAD_STATUS 0 DANTTO4K_DOWNLOAD_CODE)
+  if(DANTTO4K_DOWNLOAD_CODE EQUAL 0)
+    set(DANTTO4K_STAGING "${CMAKE_BINARY_DIR}/dantto4k-staging")
+    file(REMOVE_RECURSE "${DANTTO4K_STAGING}")
+    file(MAKE_DIRECTORY "${DANTTO4K_STAGING}")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar xf "${DANTTO4K_ARCHIVE}"
+      WORKING_DIRECTORY "${DANTTO4K_STAGING}"
+      RESULT_VARIABLE DANTTO4K_EXTRACT_RESULT)
+    if(DANTTO4K_EXTRACT_RESULT EQUAL 0
+        AND EXISTS "${DANTTO4K_STAGING}/dantto4k.exe")
+      file(REMOVE_RECURSE "${DANTTO4K_DIR}")
+      file(RENAME "${DANTTO4K_STAGING}" "${DANTTO4K_DIR}")
+      file(WRITE "${DANTTO4K_STAMP}" "${DANTTO4K_ARTIFACT_ID}")
+    else()
+      message(WARNING "Failed to extract the dantto4k artifact.")
+    endif()
+  else()
+    message(WARNING "Failed to download the dantto4k artifact.")
+  endif()
+endif()
+
+if(EXISTS "${DANTTO4K_EXE}" AND NOT EXISTS "${DANTTO4K_LICENSE}")
+  file(DOWNLOAD
+    "https://raw.githubusercontent.com/nekohkr/dantto4k/main/LICENSE"
+    "${DANTTO4K_LICENSE}"
+    EXPECTED_HASH SHA256=c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
+    TLS_VERIFY ON STATUS DANTTO4K_LICENSE_STATUS)
+endif()
+
+if(EXISTS "${DANTTO4K_EXE}")
+  install(FILES "${DANTTO4K_EXE}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
+  if(EXISTS "${DANTTO4K_LICENSE}")
+    install(FILES "${DANTTO4K_LICENSE}"
+      DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/licenses/dantto4k"
+      COMPONENT Runtime)
+  endif()
+else()
+  message(WARNING "dantto4k.exe unavailable; MMT/TLV playback will be disabled.")
+endif()

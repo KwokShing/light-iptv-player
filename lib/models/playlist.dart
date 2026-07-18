@@ -1,7 +1,7 @@
 import '../constants.dart';
 import '../dash/clearkey_license.dart';
 
-enum SourceKind { local, online, single }
+enum SourceKind { local, online, single, media }
 
 class Channel {
   const Channel({

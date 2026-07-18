@@ -101,6 +101,47 @@ class _SourcesPageState extends State<SourcesPage> {
     }
   }
 
+  Future<void> _addLocalMedia(BuildContext context) async {
+    final sources = context.read<SourcesController>();
+    try {
+      final result = await FilePicker.pickFiles(
+        dialogTitle: 'Load MMT/TLV Media',
+        type: FileType.custom,
+        allowedExtensions: const ['mmt', 'mmts', 'tlv'],
+        lockParentWindow: true,
+      );
+      final files = result?.files;
+      if (files == null || files.isEmpty) return;
+      final file = files.first;
+      final path = file.path;
+      if (path == null || path.isEmpty) {
+        throw StateError('The selected file has no local path');
+      }
+      final name = file.name.replaceFirst(
+        RegExp(r'\.(?:mmt|mmts|tlv)$', caseSensitive: false),
+        '',
+      );
+      final displayName = name.isEmpty ? 'Local MMT/TLV' : name;
+      await sources.upsert(
+        PlaylistSource(
+          id: newSourceId(),
+          name: displayName,
+          kind: SourceKind.media,
+          source: path,
+          channels: [
+            Channel(name: displayName, url: path, group: 'Local Media'),
+          ],
+          cached: true,
+        ),
+      );
+      if (context.mounted) _showMessage(context, 'Loaded ${file.name}');
+    } catch (error) {
+      if (context.mounted) {
+        _showMessage(context, 'Failed to load MMT/TLV file: $error');
+      }
+    }
+  }
+
   Future<void> _addOnlineSource(BuildContext context) async {
     final sources = context.read<SourcesController>();
     final values = await showSourceDialog(
@@ -152,7 +193,10 @@ class _SourcesPageState extends State<SourcesPage> {
     );
   }
 
-  Future<void> _renameSource(BuildContext context, PlaylistSource source) async {
+  Future<void> _renameSource(
+    BuildContext context,
+    PlaylistSource source,
+  ) async {
     final sources = context.read<SourcesController>();
     final result = await showEditSourceDialog(context, source: source);
     if (result == null) return;
@@ -160,7 +204,9 @@ class _SourcesPageState extends State<SourcesPage> {
       case EditSourceResultName(:final name):
         await sources.replace(source.copyWith(name: name));
       case EditSourceResultUrl(:final url, :final name):
-        final updatedSource = name != null ? source.copyWith(name: name) : source;
+        final updatedSource = name != null
+            ? source.copyWith(name: name)
+            : source;
         if (updatedSource.kind == SourceKind.single) {
           await sources.replace(
             updatedSource.copyWith(
@@ -205,7 +251,10 @@ class _SourcesPageState extends State<SourcesPage> {
     }
   }
 
-  Future<void> _deleteSource(BuildContext context, PlaylistSource source) async {
+  Future<void> _deleteSource(
+    BuildContext context,
+    PlaylistSource source,
+  ) async {
     final sources = context.read<SourcesController>();
     final ui = context.read<UiController>();
     final playback = context.read<PlaybackController>();
@@ -252,6 +301,7 @@ class _SourcesPageState extends State<SourcesPage> {
                 trailing: [
                   _AddSourceButton(
                     onLocal: () => _addLocalSource(context),
+                    onLocalMedia: () => _addLocalMedia(context),
                     onOnline: () => _addOnlineSource(context),
                     onSingle: () => _addSingleChannel(context),
                   ),
@@ -260,7 +310,9 @@ class _SourcesPageState extends State<SourcesPage> {
                     icon: Icons.refresh_rounded,
                     label: 'Refresh All',
                     busy: sources.refreshingAll,
-                    onPressed: sources.refreshingAll ? null : sources.refreshAll,
+                    onPressed: sources.refreshingAll
+                        ? null
+                        : sources.refreshAll,
                   ),
                   const SizedBox(width: 10),
                   const ProxyButton(),
@@ -282,7 +334,9 @@ class _SourcesPageState extends State<SourcesPage> {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: AppColors.accentSoft,
-                                border: Border.all(color: AppColors.accentBorder),
+                                border: Border.all(
+                                  color: AppColors.accentBorder,
+                                ),
                               ),
                               child: const Icon(
                                 Icons.playlist_add_rounded,
@@ -316,7 +370,9 @@ class _SourcesPageState extends State<SourcesPage> {
                           return SourceTile(
                             source: source,
                             onOpen: () => _openSource(context, source),
-                            onRefresh: source.kind == SourceKind.single
+                            onRefresh:
+                                source.kind == SourceKind.single ||
+                                    source.kind == SourceKind.media
                                 ? null
                                 : () => sources.refreshOne(source),
                             isRefreshing: sources.refreshingSourceIds.contains(
@@ -342,11 +398,13 @@ class _SourcesPageState extends State<SourcesPage> {
 class _AddSourceButton extends StatelessWidget {
   const _AddSourceButton({
     required this.onLocal,
+    required this.onLocalMedia,
     required this.onOnline,
     required this.onSingle,
   });
 
   final VoidCallback onLocal;
+  final VoidCallback onLocalMedia;
   final VoidCallback onOnline;
   final VoidCallback onSingle;
 
@@ -365,8 +423,10 @@ class _AddSourceButton extends StatelessWidget {
           case 0:
             onLocal();
           case 1:
-            onOnline();
+            onLocalMedia();
           case 2:
+            onOnline();
+          case 3:
             onSingle();
         }
       },
@@ -380,10 +440,20 @@ class _AddSourceButton extends StatelessWidget {
         ),
         PopupMenuItem(
           value: 1,
-          child: _AddMenuRow(icon: Icons.link_rounded, label: 'Online M3U Link'),
+          child: _AddMenuRow(
+            icon: Icons.video_file_rounded,
+            label: 'Load MMT/TLV Media',
+          ),
         ),
         PopupMenuItem(
           value: 2,
+          child: _AddMenuRow(
+            icon: Icons.link_rounded,
+            label: 'Online M3U Link',
+          ),
+        ),
+        PopupMenuItem(
+          value: 3,
           child: _AddMenuRow(
             icon: Icons.play_circle_outline_rounded,
             label: 'Single Channel',
@@ -497,7 +567,10 @@ class _UpdateBanner extends StatelessWidget {
                 ] else if (!updating)
                   const Text(
                     'The update zip will be saved to the app folder for you to install.',
-                    style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 12,
+                    ),
                   ),
               ],
             ),

@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 import '../dash/dash_stream_server.dart';
 import '../models/playlist.dart';
 import '../services/debug_log_service.dart';
+import '../services/mmt_tlv_stream_server.dart';
 import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
 
@@ -42,14 +43,17 @@ class PlaybackController extends ChangeNotifier {
   // mpv is pointed at its single muxed/decrypted local fMP4 stream instead of
   // the origin URL.
   final DashStreamServer _dashServer = DashStreamServer();
+  // dantto4k remuxes ARIB MMT/TLV into MPEG-TS because FFmpeg/libmpv does not
+  // provide an MMT/TLV demuxer. The loopback server keeps that native helper
+  // outside the mpv process and can restart it for reconnects.
+  final MmtTlvStreamServer _mmtTlvServer = MmtTlvStreamServer();
   // The URL actually handed to mpv for the current channel: the origin URL for
-  // plain streams, or the proxy's local manifest for ClearKey DASH. Used by the
-  // reconnect path so it reloads the right source.
+  // plain streams, or a loopback proxy URL for ClearKey DASH and MMT/TLV.
+  // Used by the reconnect path so it reloads the right source.
   String _activeStreamUrl = '';
-  // Whether the currently active stream is HLS (an m3u8 manifest). Retained so
-  // the reconnect path re-applies the same lavf/HLS demuxer hint that play()
-  // set for the initial open.
+  // Retain format hints so reconnects re-apply the same lavf demuxer options.
   bool _activeIsHls = false;
+  bool _activeIsMmtTlv = false;
 
   final TextEditingController streamUrlController = TextEditingController();
   final FocusNode playerFocusNode = FocusNode();
@@ -92,6 +96,7 @@ class PlaybackController extends ChangeNotifier {
     // Started, but mpv has stalled waiting for data.
     return _buffering;
   }
+
   // Set true once a channel has actually started rendering. Distinguishes a
   // legitimate mid-stream segment boundary (reconnect is desirable) from a
   // stream that could never connect in the first place (reconnecting forever,
@@ -168,6 +173,7 @@ class PlaybackController extends ChangeNotifier {
     playerFocusNode.dispose();
     streamUrlController.dispose();
     _dashServer.dispose();
+    _mmtTlvServer.dispose();
     player.dispose();
     _messages.close();
     super.dispose();
@@ -355,7 +361,9 @@ class PlaybackController extends ChangeNotifier {
       // still falling back to direct playback. Hold off on failing and let the
       // grace period / reconnect path resolve it.
       if (_deferFailureForYtdl()) {
-        debugPrint('player error before first frame but ytdl_hook-only -> defer');
+        debugPrint(
+          'player error before first frame but ytdl_hook-only -> defer',
+        );
         return;
       }
       debugPrint('player error before first frame -> Load error');
@@ -434,19 +442,23 @@ class PlaybackController extends ChangeNotifier {
   //   isHls is true for a real HLS manifest, so the caller can force mpv's
   //     lavf/HLS demuxer instead of letting mpv misdetect it as a plaintext
   //     playlist.
-  Future<({bool nativeSafe, bool isHls, String? mediaUrl})> _probeStream(
-    String url,
-  ) async {
+  Future<({bool nativeSafe, bool isHls, bool isMmtTlv, String? mediaUrl})>
+  _probeStream(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
-      return (nativeSafe: true, isHls: false, mediaUrl: null);
+      return (
+        nativeSafe: true,
+        isHls: false,
+        isMmtTlv: isMmtTlvSource(url),
+        mediaUrl: null,
+      );
     }
     final client = http.Client();
     try {
       final request = http.Request('GET', uri)
         ..followRedirects = true
         ..headers['User-Agent'] = 'Mozilla/5.0'
-        ..headers['Range'] = 'bytes=0-4095';
+        ..headers['Range'] = 'bytes=0-8191';
       final response = await client
           .send(request)
           .timeout(const Duration(seconds: 6));
@@ -454,8 +466,11 @@ class PlaybackController extends ChangeNotifier {
           .toLowerCase();
       final bytes = <int>[];
       await for (final chunk in response.stream) {
-        bytes.addAll(chunk);
-        if (bytes.length >= 4096) break;
+        final remaining = 8192 - bytes.length;
+        bytes.addAll(
+          chunk.length <= remaining ? chunk : chunk.sublist(0, remaining),
+        );
+        if (bytes.length >= 8192) break;
       }
       final head = utf8.decode(
         bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes,
@@ -466,7 +481,12 @@ class PlaybackController extends ChangeNotifier {
           head.contains('<MPD') ||
           head.contains('urn:mpeg:dash');
       if (looksDash) {
-        return (nativeSafe: false, isHls: false, mediaUrl: null);
+        return (
+          nativeSafe: false,
+          isHls: false,
+          isMmtTlv: false,
+          mediaUrl: null,
+        );
       }
       // A real HLS manifest: #EXTM3U plus at least one #EXT-X- tag, or an
       // mpegurl content type. These must be opened by mpv's HLS/lavf demuxer,
@@ -479,11 +499,15 @@ class PlaybackController extends ChangeNotifier {
           contentType.contains('mpegurl') ||
           contentType.contains('vnd.apple.mpegurl');
       if (isHls) {
-        return (nativeSafe: true, isHls: true, mediaUrl: null);
+        return (nativeSafe: true, isHls: true, isMmtTlv: false, mediaUrl: null);
       }
       return (
         nativeSafe: true,
         isHls: false,
+        isMmtTlv:
+            isMmtTlvSource(url) ||
+            isMmtTlvContentType(contentType) ||
+            looksLikeMmtTlv(bytes),
         mediaUrl: _unwrapPlaintextPlaylist(head, uri),
       );
     } finally {
@@ -540,11 +564,13 @@ class PlaybackController extends ChangeNotifier {
     _clearFreezeFrame();
     streamUrlController.text = channel.url;
     debugPrint('Playing: ${channel.name} - ${channel.url}');
-    debugPrint('  channel drm: manifestType=${channel.manifestType} '
-        'licenseType=${channel.licenseType} '
-        'licenseKey=${channel.licenseKey} '
-        'isDash=${channel.isDash} clearKeys=${channel.clearKeys.length} '
-        'isEncryptedDash=${channel.isEncryptedDash}');
+    debugPrint(
+      '  channel drm: manifestType=${channel.manifestType} '
+      'licenseType=${channel.licenseType} '
+      'licenseKey=${channel.licenseKey} '
+      'isDash=${channel.isDash} clearKeys=${channel.clearKeys.length} '
+      'isEncryptedDash=${channel.isEncryptedDash}',
+    );
     nowPlaying = channel;
     videoParams = const VideoParams();
     selectedTrack = const Track();
@@ -561,6 +587,9 @@ class PlaybackController extends ChangeNotifier {
     } else {
       await player.stop();
     }
+    if (_disposed || request != playbackRequest) return;
+    // Stop any converter left by the previous channel before preparing this one.
+    await _mmtTlvServer.stop();
     if (_disposed || request != playbackRequest) return;
 
     // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the
@@ -607,11 +636,19 @@ class PlaybackController extends ChangeNotifier {
     // manifest.
     var nativeSafe = true;
     var isHls = false;
+    var isMmtTlv =
+        isMmtTlvSource(channel.url) ||
+        const {
+          'mmt',
+          'mmts',
+          'tlv',
+        }.contains((channel.manifestType ?? '').toLowerCase());
     if (!channel.isDash && !channel.isEncryptedDash) {
       try {
         final probe = await _probeStream(channel.url);
         nativeSafe = probe.nativeSafe;
         isHls = probe.isHls;
+        isMmtTlv = isMmtTlv || probe.isMmtTlv;
         if (probe.mediaUrl != null && probe.mediaUrl != streamUrl) {
           debugPrint('Unwrapped plaintext playlist -> ${probe.mediaUrl}');
           DebugLogService.instance.add(
@@ -619,6 +656,7 @@ class PlaybackController extends ChangeNotifier {
             source: 'app',
           );
           streamUrl = probe.mediaUrl!;
+          isMmtTlv = isMmtTlv || isMmtTlvSource(streamUrl);
         }
       } catch (_) {}
     }
@@ -632,9 +670,30 @@ class PlaybackController extends ChangeNotifier {
       return;
     }
 
+    if (isMmtTlv) {
+      try {
+        streamUrl = await _mmtTlvServer.start(streamUrl);
+        DebugLogService.instance.add(
+          'MMT/TLV converter started',
+          source: 'app',
+        );
+      } catch (error) {
+        DebugLogService.instance.add(
+          'MMT/TLV converter failed to start: $error',
+          level: DebugLogLevel.error,
+          source: 'app',
+        );
+        if (_disposed || request != playbackRequest) return;
+        _failureLabel = 'Load error';
+        notifyListeners();
+        return;
+      }
+    }
+
     _activeStreamUrl = streamUrl;
     _activeIsHls = isHls;
-    await _applyPlaybackOptions(isHls: isHls);
+    _activeIsMmtTlv = isMmtTlv;
+    await _applyPlaybackOptions(isHls: isHls, isMmtTlv: isMmtTlv);
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
     _engineDirty = true;
@@ -647,7 +706,9 @@ class PlaybackController extends ChangeNotifier {
   }
 
   bool _deferFailureForYtdl() {
-    if (_everPlayed || _failureLabel != null || nowPlaying == null) return false;
+    if (_everPlayed || _failureLabel != null || nowPlaying == null) {
+      return false;
+    }
     final at = _lastYtdlHookErrorAt;
     if (at == null || DateTime.now().difference(at) > _ytdlGracePeriod) {
       return false;
@@ -747,14 +808,21 @@ class PlaybackController extends ChangeNotifier {
     );
     try {
       if (_reconnectAttempts > 1) {
-        await _applyPlaybackOptions(isHls: _activeIsHls);
+        await _applyPlaybackOptions(
+          isHls: _activeIsHls,
+          isMmtTlv: _activeIsMmtTlv,
+        );
         if (_disposed || request != playbackRequest) return;
       }
       final platform = player.platform;
       var replaced = false;
       if (platform != null) {
         try {
-          await (platform as dynamic).command(['loadfile', reloadUrl, 'replace']);
+          await (platform as dynamic).command([
+            'loadfile',
+            reloadUrl,
+            'replace',
+          ]);
           await player.play();
           replaced = true;
         } catch (e) {
@@ -787,8 +855,10 @@ class PlaybackController extends ChangeNotifier {
     _ytdlGraceTimer = null;
     _activeStreamUrl = '';
     _activeIsHls = false;
+    _activeIsMmtTlv = false;
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
+    unawaited(_mmtTlvServer.stop());
     streamUrlController.clear();
     // Tear the engine down entirely rather than just pausing it. media_kit's
     // player.stop() leaves the last decoded frame in the Flutter texture, so a
@@ -958,7 +1028,10 @@ class PlaybackController extends ChangeNotifier {
     return '${kbps.toStringAsFixed(0)} Kbps';
   }
 
-  Future<void> _applyPlaybackOptions({bool isHls = false}) async {
+  Future<void> _applyPlaybackOptions({
+    bool isHls = false,
+    bool isMmtTlv = false,
+  }) async {
     final platform = player.platform;
     if (platform == null) return;
 
@@ -977,14 +1050,11 @@ class PlaybackController extends ChangeNotifier {
       // log with "youtube-dl failed: not found". Turn it off so a failed stream
       // fails fast and cleanly.
       'ytdl': 'no',
-      // Force ffmpeg's demuxer for HLS. Given only an m3u8 URL, mpv otherwise
-      // hands it to its native `playlist` demuxer (logged as "Reading plaintext
-      // playlist"), which plays the media-playlist segments one at a time and,
-      // on a live sliding-window stream, floods the log with "curl: Cannot seek
-      // backward in linear streams!" and stalls. lavf runs ffmpeg's real HLS
-      // demuxer, which follows the live playlist correctly. Cleared (empty =
-      // auto) for non-HLS streams so their own format detection is untouched.
-      'demuxer': isHls ? 'lavf' : '',
+      // Force FFmpeg's demuxer for HLS and for the MPEG-TS stream produced by
+      // the MMT/TLV converter. Cleared for other formats so normal probing is
+      // unaffected when switching channels.
+      'demuxer': (isHls || isMmtTlv) ? 'lavf' : '',
+      'demuxer-lavf-format': isMmtTlv ? 'mpegts' : '',
       // Deinterlacing is handled via an explicit video filter (see
       // _applyDeinterlaceFilter), applied after the option loop so the filter
       // string can be swapped live without a reload. Nothing to set here.
@@ -1059,10 +1129,14 @@ class PlaybackController extends ChangeNotifier {
     if (platform == null) return;
     final enable = fps > 0 && fps < 40;
     try {
-      await (platform as dynamic)
-          .setProperty('video-sync', enable ? 'display-resample' : 'audio');
-      await (platform as dynamic)
-          .setProperty('interpolation', enable ? 'yes' : 'no');
+      await (platform as dynamic).setProperty(
+        'video-sync',
+        enable ? 'display-resample' : 'audio',
+      );
+      await (platform as dynamic).setProperty(
+        'interpolation',
+        enable ? 'yes' : 'no',
+      );
       if (enable) {
         await (platform as dynamic).setProperty('tscale', 'oversample');
       }
