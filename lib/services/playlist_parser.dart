@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 
 import '../constants.dart';
 import '../models/playlist.dart';
+import 'user_agent_service.dart';
 
 /// Parsed result of a playlist: its channels plus an optional EPG (XMLTV) URL
 /// declared in the M3U header (`url-tvg` / `x-tvg-url`).
@@ -234,7 +235,9 @@ Future<String> fetchPlaylistText(
 }) async {
   final http.Response response;
   try {
-    response = await http.get(Uri.parse(url)).timeout(timeout);
+    response = await http
+        .get(Uri.parse(url), headers: UserAgentService.headers)
+        .timeout(timeout);
   } on TimeoutException {
     throw const PlaylistFetchException('Connection timed out');
   }

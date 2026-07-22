@@ -15,6 +15,7 @@ import '../services/debug_log_service.dart';
 import '../services/mmt_tlv_stream_server.dart';
 import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
+import '../services/user_agent_service.dart';
 
 /// Owns the media_kit player engine and all playback state: the reconnect
 /// state machine, ytdl grace handling, freeze-frame overlay, mpv option
@@ -457,7 +458,7 @@ class PlaybackController extends ChangeNotifier {
     try {
       final request = http.Request('GET', uri)
         ..followRedirects = true
-        ..headers['User-Agent'] = 'Mozilla/5.0'
+        ..headers['User-Agent'] = UserAgentService.resolve('Mozilla/5.0')
         ..headers['Range'] = 'bytes=0-8191';
       final response = await client
           .send(request)
@@ -1078,6 +1079,10 @@ class PlaybackController extends ChangeNotifier {
       // it grows toward tens of MiB the entire time a stream plays. Live IPTV
       // can never seek backward, so that buffer is pure wasted RAM. Cap it hard.
       'demuxer-max-back-bytes': (4 * 1024 * 1024).toString(),
+      // Apply the global override to libmpv itself so HLS manifests, media
+      // segments and direct streams use the same identity as Dart requests.
+      if (UserAgentService.current != null)
+        'user-agent': UserAgentService.current!,
       // Region proxy for the stream itself. Local ClearKey-proxy streams stay
       // DIRECT here (their origin requests are proxied inside dash_clearkey
       // via HttpOverrides instead). An empty value clears any proxy left over

@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
+import 'user_agent_service.dart';
+
 /// Result of a reachability probe against a channel's stream host.
 class PingResult {
   const PingResult.reachable(this.ms) : reachable = true;
@@ -54,9 +56,6 @@ class PingService {
 
   static const Duration timeout = Duration(seconds: 5);
 
-  // Many IPTV servers reject unknown clients, so present a player-like agent.
-  static const String _userAgent = 'VLC/3.0.20 LibVLC/3.0.20';
-
   static final http.Client _client = http.Client();
   // Probes are almost entirely idle network waits, so a higher ceiling is cheap
   // and keeps the rows currently on screen from queueing behind slow/dead hosts
@@ -66,6 +65,7 @@ class PingService {
   static final Map<String, PingResult> _cache = <String, PingResult>{};
   static final Map<String, Future<PingResult>> _inFlight =
       <String, Future<PingResult>>{};
+  static int _generation = 0;
 
   /// Bumped whenever a cached result changes so widgets showing a URL's ping
   /// (e.g. ChannelPing) can refresh — notably when [markReachable] corrects a
@@ -73,6 +73,14 @@ class PingService {
   static final ValueNotifier<int> revision = ValueNotifier<int>(0);
 
   static PingResult? cached(String url) => _cache[url];
+
+  /// Discards results measured with the previous User-Agent so visible rows
+  /// are probed again with the newly selected identity.
+  static void clearCache() {
+    _generation++;
+    _cache.clear();
+    revision.value++;
+  }
 
   /// Records that [url] is reachable with [ms] latency, overriding any cached
   /// (possibly stale "unreachable") result. Called when a channel actually
@@ -87,23 +95,29 @@ class PingService {
   static Future<PingResult> ping(String url) {
     final existing = _cache[url];
     if (existing != null) return Future<PingResult>.value(existing);
-    final inFlight = _inFlight[url];
+    final generation = _generation;
+    final key = '$generation\n$url';
+    final inFlight = _inFlight[key];
     if (inFlight != null) return inFlight;
 
-    final future = _runGuarded(url);
-    _inFlight[url] = future;
+    final future = _runGuarded(url, generation, key);
+    _inFlight[key] = future;
     return future;
   }
 
-  static Future<PingResult> _runGuarded(String url) async {
+  static Future<PingResult> _runGuarded(
+    String url,
+    int generation,
+    String key,
+  ) async {
     await _semaphore.acquire();
     try {
       final result = await _measure(url);
-      _cache[url] = result;
+      if (generation == _generation) _cache[url] = result;
       return result;
     } finally {
       _semaphore.release();
-      _inFlight.remove(url);
+      _inFlight.remove(key);
     }
   }
 
@@ -122,7 +136,9 @@ class PingService {
       ..followRedirects = true
       ..maxRedirects = 5
       ..headers['Range'] = 'bytes=0-1'
-      ..headers['User-Agent'] = _userAgent
+      ..headers['User-Agent'] = UserAgentService.resolve(
+        'VLC/3.0.20 LibVLC/3.0.20',
+      )
       ..headers['Accept'] = '*/*';
 
     final stopwatch = Stopwatch()..start();

@@ -175,8 +175,7 @@ class SeekBar extends StatelessWidget {
               activeTrackColor: dark ? Colors.white : AppColors.accent,
               thumbColor: dark ? Colors.white : AppColors.accent,
               overlayColor: const Color(0x333b6ef5),
-              inactiveTrackColor:
-                  dark ? Colors.white24 : AppColors.border,
+              inactiveTrackColor: dark ? Colors.white24 : AppColors.border,
             ),
             child: Slider(
               value: positionMs,
@@ -352,7 +351,11 @@ class _ChannelPingState extends State<ChannelPing> {
   void _onRevision() {
     final latest = PingService.cached(widget.url);
     if (!mounted || latest == _result) return;
-    setState(() => _result = latest);
+    setState(() {
+      _result = latest;
+      if (latest == null) _requested = false;
+    });
+    if (latest == null) _maybePing();
   }
 
   void _maybePing() {

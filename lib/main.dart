@@ -12,6 +12,7 @@ import 'controllers/proxy_controller.dart';
 import 'controllers/sources_controller.dart';
 import 'controllers/ui_controller.dart';
 import 'controllers/update_controller.dart';
+import 'controllers/user_agent_controller.dart';
 import 'constants.dart';
 import 'pages/player_page.dart';
 import 'pages/sources_page.dart';
@@ -37,6 +38,8 @@ Future<void> main() async {
   HttpOverrides.global = ProxyHttpOverrides();
   final proxyController = ProxyController();
   await proxyController.load();
+  final userAgentController = UserAgentController();
+  await userAgentController.load();
   MediaKit.ensureInitialized();
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
@@ -56,7 +59,12 @@ Future<void> main() async {
       await windowManager.focus();
     },
   );
-  runApp(IptvApp(proxyController: proxyController));
+  runApp(
+    IptvApp(
+      proxyController: proxyController,
+      userAgentController: userAgentController,
+    ),
+  );
 }
 
 void _filterNoisyDebugLogs() {
@@ -73,23 +81,30 @@ void _filterNoisyDebugLogs() {
 }
 
 class IptvApp extends StatelessWidget {
-  const IptvApp({super.key, required this.proxyController});
+  const IptvApp({
+    super.key,
+    required this.proxyController,
+    required this.userAgentController,
+  });
 
   final ProxyController proxyController;
+  final UserAgentController userAgentController;
 
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
         ChangeNotifierProvider.value(value: proxyController),
+        ChangeNotifierProvider.value(value: userAgentController),
         ChangeNotifierProvider(create: (_) => SourcesController()..load()),
         ChangeNotifierProvider(create: (_) => PlaybackController()),
         ChangeNotifierProvider(create: (_) => EpgController()..restore()),
-        ChangeNotifierProvider(create: (_) => UpdateController()..checkForUpdate()),
+        ChangeNotifierProvider(
+          create: (_) => UpdateController()..checkForUpdate(),
+        ),
         ChangeNotifierProxyProvider<SourcesController, UiController>(
-          create: (context) => UiController(
-            sources: context.read<SourcesController>(),
-          ),
+          create: (context) =>
+              UiController(sources: context.read<SourcesController>()),
           update: (context, sources, previous) =>
               previous ?? UiController(sources: sources),
         ),

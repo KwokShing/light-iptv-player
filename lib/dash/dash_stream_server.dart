@@ -29,6 +29,7 @@ import 'dash_segment_index.dart';
 import 'mp4/boxes.dart';
 import 'mp4/cenc.dart';
 import 'mp4/fmp4_muxer.dart';
+import '../services/user_agent_service.dart';
 import 'representation.dart';
 
 /// A selected track: its representation plus the resolved base URL used to
@@ -74,14 +75,14 @@ class DashStreamServer {
   // Guards against overlapping streaming sessions when mpv reconnects.
   int _sessionSeq = 0;
 
-  // Many DASH/IPTV CDNs treat clients by User-Agent — several serve full speed
-  // to Android players but throttle desktop UAs (the likely cause of "Android
-  // plays 1080p fine, PC crawls"). Present an Android UA to match the fast path.
-  static const Map<String, String> _originHeaders = {
-    'User-Agent':
-        'Dalvik/2.1.0 (Linux; U; Android 11; MI 6X Build/RQ3A.211001.001) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 '
-        'Mobile Safari/537.36',
+  // Preserve the tuned Android identity by default while allowing the global
+  // setting to override it for every manifest and segment request.
+  Map<String, String> get _originHeaders => {
+    'User-Agent': UserAgentService.resolve(
+      'Dalvik/2.1.0 (Linux; U; Android 11; MI 6X Build/RQ3A.211001.001) '
+      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 '
+      'Mobile Safari/537.36',
+    ),
     'Connection': 'keep-alive',
   };
 
@@ -99,8 +100,9 @@ class DashStreamServer {
     _renditionsLogged = false;
     _keys = {
       for (final e in keys.entries)
-        e.key.replaceAll(RegExp(r'[^0-9a-fA-F]'), '').toLowerCase():
-            e.value.replaceAll(RegExp(r'[^0-9a-fA-F]'), '').toLowerCase(),
+        e.key.replaceAll(RegExp(r'[^0-9a-fA-F]'), '').toLowerCase(): e.value
+            .replaceAll(RegExp(r'[^0-9a-fA-F]'), '')
+            .toLowerCase(),
     };
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     _server = server;
@@ -183,8 +185,10 @@ class DashStreamServer {
       req.response.statusCode = HttpStatus.badGateway;
       return;
     }
-    debugPrint('dash: selected video=${video.representation.format} '
-        'audio=${audio?.representation.format}');
+    debugPrint(
+      'dash: selected video=${video.representation.format} '
+      'audio=${audio?.representation.format}',
+    );
 
     req.response.statusCode = HttpStatus.ok;
     req.response.headers.contentType = ContentType('video', 'mp4');
@@ -216,7 +220,12 @@ class DashStreamServer {
     var periodDurationUs = manifest.getPeriodDurationUs(periodIndex);
     final nowUs = DateTime.now().toUtc().millisecondsSinceEpoch * 1000;
 
-    var segmentNum = _initialSegmentNum(manifest, video, periodDurationUs, nowUs);
+    var segmentNum = _initialSegmentNum(
+      manifest,
+      video,
+      periodDurationUs,
+      nowUs,
+    );
     final followingLiveEdge = _isLiveEdge(manifest, video, periodDurationUs);
 
     var videoTrack = video;
@@ -281,7 +290,10 @@ class DashStreamServer {
             ? segmentNum + _prefetchDepth
             : () {
                 final last = _lastAvailableSegmentNum(
-                    manifest, videoTrack, periodDurationUs);
+                  manifest,
+                  videoTrack,
+                  periodDurationUs,
+                );
                 return last == DashSegmentIndex.indexUnbounded
                     ? segmentNum + _prefetchDepth
                     : last;
@@ -311,8 +323,9 @@ class DashStreamServer {
             // from wherever the refreshed timeline now reaches.
             edgeMisses++;
             pipeline.clear();
-            await Future<void>.delayed(Duration(
-                milliseconds: edgeMisses <= 1 ? 500 : 1500));
+            await Future<void>.delayed(
+              Duration(milliseconds: edgeMisses <= 1 ? 500 : 1500),
+            );
             if (session != _sessionSeq) return;
             final refreshed = await _fetchManifest(fromOrigin: true);
             if (refreshed != null) {
@@ -335,7 +348,10 @@ class DashStreamServer {
               // forever for a number the new session may never use, re-anchor
               // to the new edge.
               final newLast = _lastAvailableSegmentNum(
-                  manifest, videoTrack, periodDurationUs);
+                manifest,
+                videoTrack,
+                periodDurationUs,
+              );
               if (newLast != DashSegmentIndex.indexUnbounded &&
                   segmentNum > newLast) {
                 if (edgeMisses >= 3) {
@@ -343,8 +359,10 @@ class DashStreamServer {
                   final firstSeg = videoTrack.index.getFirstSegmentNum();
                   segmentNum = resumeAt < firstSeg ? firstSeg : resumeAt;
                   edgeMisses = 0;
-                  debugPrint('dash: live-edge re-anchor -> seg=$segmentNum '
-                      '(newLast=$newLast)');
+                  debugPrint(
+                    'dash: live-edge re-anchor -> seg=$segmentNum '
+                    '(newLast=$newLast)',
+                  );
                 }
               } else {
                 edgeMisses = 0; // segment is now available; proceed.
@@ -404,7 +422,11 @@ class DashStreamServer {
   // bounded by the prefetch pipeline. Returns null if the video segment is
   // missing (e.g. beyond the live edge) or muxing fails.
   Future<Uint8List?> _loadMuxedFragment(
-      _SelectedTrack video, _SelectedTrack? audio, int segmentNum, int sequence) async {
+    _SelectedTrack video,
+    _SelectedTrack? audio,
+    int segmentNum,
+    int sequence,
+  ) async {
     final results = await Future.wait<Uint8List?>([
       _loadSegment(video, segmentNum),
       if (audio != null) _loadSegment(audio, segmentNum),
@@ -430,8 +452,11 @@ class DashStreamServer {
   _SelectedTrack? _selectAudio(DashManifest manifest) =>
       _selectTrack(manifest, C.trackTypeAudio, lowestBitrate: false);
 
-  _SelectedTrack? _selectTrack(DashManifest manifest, int trackType,
-      {required bool lowestBitrate}) {
+  _SelectedTrack? _selectTrack(
+    DashManifest manifest,
+    int trackType, {
+    required bool lowestBitrate,
+  }) {
     if (manifest.periodCount == 0) return null;
     final period = manifest.getPeriod(0);
     for (final as_ in period.adaptationSets) {
@@ -441,8 +466,10 @@ class DashStreamServer {
       final kindName = trackType == C.trackTypeVideo ? 'video' : 'audio';
       if (!_renditionsLogged) {
         final renditions = reps
-            .map((r) =>
-                '${r.format.bitrate}bps ${r.format.width}x${r.format.height}')
+            .map(
+              (r) =>
+                  '${r.format.bitrate}bps ${r.format.width}x${r.format.height}',
+            )
             .join(', ');
         debugPrint('dash: available $kindName renditions: $renditions');
       }
@@ -470,14 +497,20 @@ class DashStreamServer {
   // Segment numbering (mirrors DefaultDashChunkSource's use of DashSegmentIndex)
   // ---------------------------------------------------------------------------
 
-  int _initialSegmentNum(DashManifest manifest, _SelectedTrack track,
-      int periodDurationUs, int nowUs) {
+  int _initialSegmentNum(
+    DashManifest manifest,
+    _SelectedTrack track,
+    int periodDurationUs,
+    int nowUs,
+  ) {
     final index = track.index;
 
     if (manifest.dynamic) {
       // Live: start a few segments behind the live edge.
-      final firstAvailable =
-          index.getFirstAvailableSegmentNum(periodDurationUs, nowUs);
+      final firstAvailable = index.getFirstAvailableSegmentNum(
+        periodDurationUs,
+        nowUs,
+      );
       final available = index.getAvailableSegmentCount(periodDurationUs, nowUs);
       if (available == DashSegmentIndex.indexUnbounded || available <= 0) {
         return firstAvailable;
@@ -514,7 +547,10 @@ class DashStreamServer {
   // segments at the end) rather than stopping when the current window is
   // exhausted.
   bool _isLiveEdge(
-      DashManifest manifest, _SelectedTrack track, int periodDurationUs) {
+    DashManifest manifest,
+    _SelectedTrack track,
+    int periodDurationUs,
+  ) {
     if (manifest.dynamic) return true;
     final count = track.index.getSegmentCount(periodDurationUs);
     if (count == DashSegmentIndex.indexUnbounded) return true;
@@ -522,15 +558,22 @@ class DashStreamServer {
   }
 
   int _lastAvailableSegmentNum(
-      DashManifest manifest, _SelectedTrack track, int periodDurationUs) {
+    DashManifest manifest,
+    _SelectedTrack track,
+    int periodDurationUs,
+  ) {
     final index = track.index;
     final nowUsLive = DateTime.now().toUtc().millisecondsSinceEpoch * 1000;
     final count = index.getSegmentCount(periodDurationUs);
     if (count == DashSegmentIndex.indexUnbounded) {
-      final firstAvailable =
-          index.getFirstAvailableSegmentNum(periodDurationUs, nowUsLive);
-      final available =
-          index.getAvailableSegmentCount(periodDurationUs, nowUsLive);
+      final firstAvailable = index.getFirstAvailableSegmentNum(
+        periodDurationUs,
+        nowUsLive,
+      );
+      final available = index.getAvailableSegmentCount(
+        periodDurationUs,
+        nowUsLive,
+      );
       if (available <= 0) return DashSegmentIndex.indexUnbounded;
       return firstAvailable + available - 1;
     }
@@ -630,16 +673,19 @@ class DashStreamServer {
     for (var attempt = 0; attempt < _manifestAttempts; attempt++) {
       // After a first failure, ignore the pinned .mpd and go back to origin.
       final useOrigin = fromOrigin || attempt > 0;
-      final source =
-          (!useOrigin && _resolvedMpdUrl.isNotEmpty) ? _resolvedMpdUrl : _mpdUrl;
+      final source = (!useOrigin && _resolvedMpdUrl.isNotEmpty)
+          ? _resolvedMpdUrl
+          : _mpdUrl;
       try {
         final fetched = await _fetchFollowingRedirects(source);
         _resolvedMpdUrl = fetched.$1;
         final body = utf8.decode(fetched.$2, allowMalformed: true);
         return const DashManifestParser().parse(fetched.$1, body);
       } catch (error) {
-        debugPrint('dash: manifest fetch/parse failed '
-            '(attempt ${attempt + 1}/$_manifestAttempts): $error');
+        debugPrint(
+          'dash: manifest fetch/parse failed '
+          '(attempt ${attempt + 1}/$_manifestAttempts): $error',
+        );
         if (attempt + 1 < _manifestAttempts) {
           await Future<void>.delayed(const Duration(milliseconds: 600));
         }
@@ -671,5 +717,3 @@ class DashStreamServer {
     throw Exception('Too many redirects fetching $url');
   }
 }
-
-

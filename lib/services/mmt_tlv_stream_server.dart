@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 
 import 'debug_log_service.dart';
+import 'user_agent_service.dart';
 
 const _mmtTlvExtensions = ['.mmt', '.mmts', '.tlv'];
 
@@ -169,7 +170,7 @@ class MmtTlvStreamServer {
     try {
       final request = http.Request('GET', uri)
         ..followRedirects = true
-        ..headers['User-Agent'] = 'Mozilla/5.0';
+        ..headers['User-Agent'] = UserAgentService.resolve('Mozilla/5.0');
       final upstream = await _originClient!.send(request);
       if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
         throw HttpException('HTTP ${upstream.statusCode}', uri: uri);

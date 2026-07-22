@@ -14,6 +14,7 @@ import '../theme.dart';
 import '../widgets/proxy_button.dart';
 import '../widgets/source_widgets.dart';
 import '../widgets/top_bar.dart';
+import '../widgets/user_agent_button.dart';
 
 class SourcesPage extends StatefulWidget {
   const SourcesPage({super.key});
@@ -314,6 +315,8 @@ class _SourcesPageState extends State<SourcesPage> {
                         ? null
                         : sources.refreshAll,
                   ),
+                  const SizedBox(width: 10),
+                  const UserAgentButton(),
                   const SizedBox(width: 10),
                   const ProxyButton(),
                 ],

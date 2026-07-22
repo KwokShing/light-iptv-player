@@ -11,6 +11,7 @@ import '../models/epg.dart';
 import '../models/playlist.dart';
 import '../services/debug_log_service.dart';
 import '../services/epg_parser.dart';
+import '../services/user_agent_service.dart';
 
 /// Owns EPG (XMLTV) guides: which URL each playlist uses, downloading and
 /// parsing them off the UI thread, caching to disk, and answering now/next and
@@ -197,7 +198,7 @@ class EpgController extends ChangeNotifier {
 
   Future<Uint8List> _download(String url) async {
     final response = await http
-        .get(Uri.parse(url))
+        .get(Uri.parse(url), headers: UserAgentService.headers)
         .timeout(const Duration(seconds: 45));
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw HttpException('HTTP ${response.statusCode}');

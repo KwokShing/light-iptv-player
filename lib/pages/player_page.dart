@@ -17,6 +17,7 @@ import '../widgets/epg_schedule_panel.dart';
 import '../widgets/playback_controls.dart';
 import '../widgets/proxy_button.dart';
 import '../widgets/top_bar.dart';
+import '../widgets/user_agent_button.dart';
 
 class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key, required this.source});
@@ -109,7 +110,11 @@ class _PlayerPageState extends State<PlayerPage> {
                       onChanged: ui.setSearch,
                       hint: 'Search channels',
                     ),
-                    trailing: const [ProxyButton()],
+                    trailing: const [
+                      UserAgentButton(),
+                      SizedBox(width: 10),
+                      ProxyButton(),
+                    ],
                   ),
                 Expanded(
                   child: Row(
@@ -296,8 +301,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   playback.nowPlaying == null
                                                   ? null
                                                   : playback.takeSnapshot,
-                                              deinterlace:
-                                                  playback.deinterlace,
+                                              deinterlace: playback.deinterlace,
                                               onDeinterlace:
                                                   playback.nowPlaying == null
                                                   ? null

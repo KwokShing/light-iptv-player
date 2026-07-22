@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 const sourcesStorageKey = 'light-iptv-player:sources:flutter:v1';
 const installedTagStorageKey = 'light-iptv-player:installed-tag:v1';
 const proxyStorageKey = 'light-iptv-player:proxy:v1';
+const userAgentStorageKey = 'light-iptv-player:user-agent:v1';
 const epgStorageKey = 'light-iptv-player:epg:v1';
 const allChannels = 'All Channels';
 const ungroupedGroup = 'Ungrouped';
@@ -67,14 +68,15 @@ const _defaultPaneHeight = _defaultPaneWidth * 9.0 / 16.0;
 
 const defaultWindowWidth = _defaultPaneWidth + sideColumnsWidth;
 const defaultWindowHeight =
-    _defaultPaneHeight + _topBarHeight + _transportBarHeight + _windowChromeHeight;
-
-// Minimum keeps a usable pane while still respecting the fixed side columns.
-const minWindowWidth = 720.0 + sideColumnsWidth;
-const minWindowHeight = 405.0 +
+    _defaultPaneHeight +
     _topBarHeight +
     _transportBarHeight +
     _windowChromeHeight;
+
+// Minimum keeps a usable pane while still respecting the fixed side columns.
+const minWindowWidth = 720.0 + sideColumnsWidth;
+const minWindowHeight =
+    405.0 + _topBarHeight + _transportBarHeight + _windowChromeHeight;
 
 // Horizontal padding inside the top bar. Matches the sidebar's left padding so
 // the top bar's leading control (home button) lines up with the sidebar's left
