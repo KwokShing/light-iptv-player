@@ -11,9 +11,13 @@ class UserAgentButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final settings = context.watch<UserAgentController>().settings;
+    final selected = settings.selectedAgent;
+    final label = selected != null && settings.preset.name == 'custom'
+        ? selected.name
+        : settings.preset.label;
     return TopBarButton(
       icon: Icons.language_rounded,
-      label: 'UA: ${settings.preset.label}',
+      label: 'UA: $label',
       onPressed: () => showUserAgentDialog(context),
     );
   }

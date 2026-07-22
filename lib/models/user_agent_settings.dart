@@ -21,18 +21,68 @@ enum UserAgentPreset {
   final String? userAgent;
 }
 
+/// A user-defined, named User-Agent entry (e.g. "ua1", "ua2") that can be saved
+/// and re-selected later.
+class SavedUserAgent {
+  const SavedUserAgent({
+    required this.id,
+    required this.name,
+    required this.value,
+  });
+
+  final String id;
+  final String name;
+  final String value;
+
+  SavedUserAgent copyWith({String? name, String? value}) => SavedUserAgent(
+    id: id,
+    name: name ?? this.name,
+    value: value ?? this.value,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'value': value,
+  };
+
+  factory SavedUserAgent.fromJson(Map<String, dynamic> json) => SavedUserAgent(
+    id: (json['id'] as String?) ?? DateTime.now().microsecondsSinceEpoch.toString(),
+    name: (json['name'] as String?) ?? '',
+    value: (json['value'] as String?) ?? '',
+  );
+}
+
 class UserAgentSettings {
   const UserAgentSettings({
     this.preset = UserAgentPreset.automatic,
     this.customUserAgent = '',
+    this.savedAgents = const [],
+    this.selectedAgentId,
   });
 
   final UserAgentPreset preset;
   final String customUserAgent;
 
+  /// User-defined named User-Agent entries.
+  final List<SavedUserAgent> savedAgents;
+
+  /// The id of the currently selected saved agent, when [preset] is
+  /// [UserAgentPreset.custom].
+  final String? selectedAgentId;
+
+  SavedUserAgent? get selectedAgent {
+    if (selectedAgentId == null) return null;
+    for (final agent in savedAgents) {
+      if (agent.id == selectedAgentId) return agent;
+    }
+    return null;
+  }
+
   String? get effectiveUserAgent {
     if (preset == UserAgentPreset.custom) {
-      final value = customUserAgent.trim();
+      final selected = selectedAgent;
+      final value = (selected?.value ?? customUserAgent).trim();
       return value.isEmpty ? null : value;
     }
     return preset.userAgent;
@@ -41,14 +91,23 @@ class UserAgentSettings {
   UserAgentSettings copyWith({
     UserAgentPreset? preset,
     String? customUserAgent,
+    List<SavedUserAgent>? savedAgents,
+    String? selectedAgentId,
+    bool clearSelectedAgentId = false,
   }) => UserAgentSettings(
     preset: preset ?? this.preset,
     customUserAgent: customUserAgent ?? this.customUserAgent,
+    savedAgents: savedAgents ?? this.savedAgents,
+    selectedAgentId: clearSelectedAgentId
+        ? null
+        : (selectedAgentId ?? this.selectedAgentId),
   );
 
   Map<String, dynamic> toJson() => {
     'preset': preset.name,
     'customUserAgent': customUserAgent,
+    'savedAgents': [for (final agent in savedAgents) agent.toJson()],
+    'selectedAgentId': selectedAgentId,
   };
 
   factory UserAgentSettings.fromJson(Map<String, dynamic> json) {
@@ -60,9 +119,17 @@ class UserAgentSettings {
         break;
       }
     }
+    final rawAgents = json['savedAgents'];
+    final savedAgents = <SavedUserAgent>[
+      if (rawAgents is List)
+        for (final entry in rawAgents)
+          if (entry is Map<String, dynamic>) SavedUserAgent.fromJson(entry),
+    ];
     return UserAgentSettings(
       preset: preset,
       customUserAgent: (json['customUserAgent'] as String?) ?? '',
+      savedAgents: savedAgents,
+      selectedAgentId: json['selectedAgentId'] as String?,
     );
   }
 }
