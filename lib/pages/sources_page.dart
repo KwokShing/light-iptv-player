@@ -10,6 +10,7 @@ import '../controllers/update_controller.dart';
 import '../models/playlist.dart';
 import '../services/paste_to_play.dart';
 import '../services/playlist_parser.dart';
+import '../services/xtream_service.dart';
 import '../theme.dart';
 import '../widgets/proxy_button.dart';
 import '../widgets/source_widgets.dart';
@@ -143,6 +144,86 @@ class _SourcesPageState extends State<SourcesPage> {
     }
   }
 
+  Future<void> _addXtreamSource(BuildContext context) async {
+    final sources = context.read<SourcesController>();
+    final values = await showXtreamDialog(context);
+    if (values == null) return;
+    final server = normalizeXtreamServer(values.server);
+    try {
+      final url = xtreamPlaylistUrl(server, values.username, values.password);
+      final text = await fetchPlaylistText(url);
+      final parsed = parsePlaylist(text);
+      if (parsed.channels.isEmpty) {
+        if (context.mounted) {
+          _showMessage(context, 'No channels found (check credentials)');
+        }
+        return;
+      }
+      await sources.upsert(
+        PlaylistSource(
+          id: newSourceId(),
+          name: values.name,
+          kind: SourceKind.xtream,
+          source: server,
+          xtreamUsername: values.username,
+          xtreamPassword: values.password,
+          channels: parsed.channels,
+          cached: true,
+          epgUrl:
+              parsed.epgUrl ??
+              xtreamEpgUrl(server, values.username, values.password),
+        ),
+      );
+      if (context.mounted) {
+        _showMessage(context, 'Loaded ${parsed.channels.length} channels');
+      }
+    } catch (error) {
+      if (context.mounted) {
+        _showMessage(context, 'Failed to load Xtream account: $error');
+      }
+    }
+  }
+
+  Future<void> _editXtreamSource(
+    BuildContext context,
+    PlaylistSource source,
+  ) async {
+    final sources = context.read<SourcesController>();
+    final values = await showXtreamDialog(
+      context,
+      initial: XtreamDialogResult(
+        source.name,
+        source.source,
+        source.xtreamUsername ?? '',
+        source.xtreamPassword ?? '',
+      ),
+    );
+    if (values == null) return;
+    final server = normalizeXtreamServer(values.server);
+    try {
+      final url = xtreamPlaylistUrl(server, values.username, values.password);
+      final text = await fetchPlaylistText(url);
+      final parsed = parsePlaylist(text);
+      await sources.replace(
+        source.copyWith(
+          name: values.name,
+          source: server,
+          xtreamUsername: values.username,
+          xtreamPassword: values.password,
+          channels: parsed.channels,
+          cached: true,
+          epgUrl:
+              parsed.epgUrl ??
+              xtreamEpgUrl(server, values.username, values.password),
+        ),
+      );
+    } catch (error) {
+      if (context.mounted) {
+        _showMessage(context, 'Failed to load Xtream account: $error');
+      }
+    }
+  }
+
   Future<void> _addOnlineSource(BuildContext context) async {
     final sources = context.read<SourcesController>();
     final values = await showSourceDialog(
@@ -199,6 +280,10 @@ class _SourcesPageState extends State<SourcesPage> {
     PlaylistSource source,
   ) async {
     final sources = context.read<SourcesController>();
+    if (source.kind == SourceKind.xtream) {
+      await _editXtreamSource(context, source);
+      return;
+    }
     final result = await showEditSourceDialog(context, source: source);
     if (result == null) return;
     switch (result) {
@@ -304,6 +389,7 @@ class _SourcesPageState extends State<SourcesPage> {
                     onLocal: () => _addLocalSource(context),
                     onLocalMedia: () => _addLocalMedia(context),
                     onOnline: () => _addOnlineSource(context),
+                    onXtream: () => _addXtreamSource(context),
                     onSingle: () => _addSingleChannel(context),
                   ),
                   const SizedBox(width: 10),
@@ -403,12 +489,14 @@ class _AddSourceButton extends StatelessWidget {
     required this.onLocal,
     required this.onLocalMedia,
     required this.onOnline,
+    required this.onXtream,
     required this.onSingle,
   });
 
   final VoidCallback onLocal;
   final VoidCallback onLocalMedia;
   final VoidCallback onOnline;
+  final VoidCallback onXtream;
   final VoidCallback onSingle;
 
   @override
@@ -430,6 +518,8 @@ class _AddSourceButton extends StatelessWidget {
           case 2:
             onOnline();
           case 3:
+            onXtream();
+          case 4:
             onSingle();
         }
       },
@@ -457,6 +547,13 @@ class _AddSourceButton extends StatelessWidget {
         ),
         PopupMenuItem(
           value: 3,
+          child: _AddMenuRow(
+            icon: Icons.dns_rounded,
+            label: 'Xtream Codes Account',
+          ),
+        ),
+        PopupMenuItem(
+          value: 4,
           child: _AddMenuRow(
             icon: Icons.play_circle_outline_rounded,
             label: 'Single Channel',

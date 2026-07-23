@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../constants.dart';
 import '../models/playlist.dart';
 import '../services/playlist_parser.dart';
+import '../services/xtream_service.dart';
 
 /// Owns the list of playlist sources and their persistence, plus all
 /// add/rename/delete/refresh operations. UI-facing status text is surfaced via
@@ -79,6 +80,29 @@ class SourcesController extends ChangeNotifier {
         await File(source.source).readAsBytes(),
       );
       return compute(parsePlaylist, text);
+    }
+    if (source.kind == SourceKind.xtream) {
+      final url = xtreamPlaylistUrl(
+        source.source,
+        source.xtreamUsername ?? '',
+        source.xtreamPassword ?? '',
+      );
+      final text = await fetchPlaylistText(url);
+      final parsed = await compute(parsePlaylist, text);
+      // Xtream panels serve their guide from `xmltv.php`; use it when the M3U
+      // header didn't declare its own `url-tvg`.
+      if (parsed.epgUrl == null &&
+          (source.xtreamUsername?.isNotEmpty ?? false)) {
+        return ParsedPlaylist(
+          channels: parsed.channels,
+          epgUrl: xtreamEpgUrl(
+            source.source,
+            source.xtreamUsername!,
+            source.xtreamPassword ?? '',
+          ),
+        );
+      }
+      return parsed;
     }
     final text = await fetchPlaylistText(source.source);
     return compute(parsePlaylist, text);

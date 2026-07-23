@@ -1,7 +1,7 @@
 import '../constants.dart';
 import '../dash/clearkey_license.dart';
 
-enum SourceKind { local, online, single, media }
+enum SourceKind { local, online, single, media, xtream }
 
 class Channel {
   const Channel({
@@ -76,6 +76,8 @@ class PlaylistSource {
     required this.channels,
     required this.cached,
     this.epgUrl,
+    this.xtreamUsername,
+    this.xtreamPassword,
   });
 
   final String id;
@@ -89,12 +91,20 @@ class PlaylistSource {
   // used as the default guide source for this playlist's channels.
   final String? epgUrl;
 
+  // Xtream Codes credentials. Only set when [kind] is [SourceKind.xtream];
+  // [source] then holds the server base URL (e.g. http://host:port). These are
+  // combined into the standard `get.php` / `xmltv.php` endpoints on refresh.
+  final String? xtreamUsername;
+  final String? xtreamPassword;
+
   PlaylistSource copyWith({
     String? name,
     String? source,
     List<Channel>? channels,
     bool? cached,
     String? epgUrl,
+    String? xtreamUsername,
+    String? xtreamPassword,
   }) => PlaylistSource(
     id: id,
     name: name ?? this.name,
@@ -103,6 +113,8 @@ class PlaylistSource {
     channels: channels ?? this.channels,
     cached: cached ?? this.cached,
     epgUrl: epgUrl ?? this.epgUrl,
+    xtreamUsername: xtreamUsername ?? this.xtreamUsername,
+    xtreamPassword: xtreamPassword ?? this.xtreamPassword,
   );
 
   Map<String, dynamic> toJson() => {
@@ -112,6 +124,8 @@ class PlaylistSource {
     'source': source,
     'cached': cached,
     if (epgUrl != null) 'epgUrl': epgUrl,
+    if (xtreamUsername != null) 'xtreamUsername': xtreamUsername,
+    if (xtreamPassword != null) 'xtreamPassword': xtreamPassword,
     'channels': channels.map((channel) => channel.toJson()).toList(),
   };
 
@@ -129,6 +143,8 @@ class PlaylistSource {
       source: json['source'] as String? ?? '',
       cached: json['cached'] as bool? ?? false,
       epgUrl: json['epgUrl'] as String?,
+      xtreamUsername: json['xtreamUsername'] as String?,
+      xtreamPassword: json['xtreamPassword'] as String?,
       channels: (json['channels'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(Channel.fromJson)

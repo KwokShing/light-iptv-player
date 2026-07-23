@@ -13,6 +13,106 @@ class SourceDialogResult {
   final String source;
 }
 
+class XtreamDialogResult {
+  const XtreamDialogResult(
+    this.name,
+    this.server,
+    this.username,
+    this.password,
+  );
+  final String name;
+  final String server;
+  final String username;
+  final String password;
+}
+
+Future<XtreamDialogResult?> showXtreamDialog(
+  BuildContext context, {
+  XtreamDialogResult? initial,
+}) async {
+  final name = TextEditingController(text: initial?.name ?? '');
+  final server = TextEditingController(text: initial?.server ?? '');
+  final username = TextEditingController(text: initial?.username ?? '');
+  final password = TextEditingController(text: initial?.password ?? '');
+  InputDecoration decoration(String label, String hint) => InputDecoration(
+    labelText: label,
+    hintText: hint,
+    hintStyle: const TextStyle(color: AppColors.textMuted),
+    focusedBorder: const UnderlineInputBorder(
+      borderSide: BorderSide(color: AppColors.accent),
+    ),
+  );
+  return showDialog<XtreamDialogResult>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text(
+        'Xtream Codes Account',
+        style: TextStyle(color: AppColors.textPrimary),
+      ),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: name,
+              autofocus: true,
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: decoration('Name', 'My Provider'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: server,
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: decoration('Server URL', 'http://host:port'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: username,
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: decoration('Username', ''),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: password,
+              obscureText: true,
+              style: const TextStyle(color: AppColors.textPrimary),
+              decoration: decoration('Password', ''),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          style: TextButton.styleFrom(foregroundColor: AppColors.textSecondary),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: AppColors.accent),
+          onPressed: () {
+            final nextName = name.text.trim();
+            final nextServer = server.text.trim();
+            final nextUser = username.text.trim();
+            final nextPass = password.text;
+            if (nextName.isEmpty ||
+                nextServer.isEmpty ||
+                nextUser.isEmpty ||
+                nextPass.isEmpty) {
+              return;
+            }
+            Navigator.pop(
+              context,
+              XtreamDialogResult(nextName, nextServer, nextUser, nextPass),
+            );
+          },
+          child: Text(initial == null ? 'Create' : 'Confirm'),
+        ),
+      ],
+    ),
+  );
+}
+
 Future<SourceDialogResult?> showSourceDialog(
   BuildContext context, {
   required String title,
@@ -329,6 +429,7 @@ class SourceTile extends StatelessWidget {
     SourceKind.online => 'Online Link',
     SourceKind.single => 'Quick Test',
     SourceKind.media => 'Local MMT/TLV',
+    SourceKind.xtream => 'Xtream Codes',
   };
 
   IconData get _kindIcon => switch (source.kind) {
@@ -336,6 +437,7 @@ class SourceTile extends StatelessWidget {
     SourceKind.online => Icons.link_rounded,
     SourceKind.single => Icons.play_circle_outline_rounded,
     SourceKind.media => Icons.video_file_rounded,
+    SourceKind.xtream => Icons.dns_rounded,
   };
 
   @override
