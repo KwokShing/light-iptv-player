@@ -63,6 +63,17 @@ class PlaybackController extends ChangeNotifier {
   // Guards the log-triggered fallback: mpv can emit several AV3A warnings for
   // one stream before the local transcoder has finished starting.
   bool _av3aFallbackStarting = false;
+  // Set true for the current stream once we've fallen back to opening it with
+  // mpv's `tls-verify=no` after a TLS certificate verification failure. Some
+  // IPTV origins serve HTTPS with self-signed/expired certs; mpv (via its curl
+  // network layer) refuses them by default and prints "curl: TLS certificate
+  // verification failed" + "Failed to open". We keep verification ON normally
+  // and only disable it, per-stream, after seeing that failure — then reconnect
+  // so the stream is reopened with the relaxed setting. Reset on every play().
+  bool _tlsVerifyDisabled = false;
+  // Guards the log-triggered TLS fallback so the burst of curl error lines mpv
+  // emits for one failed open only triggers a single retry.
+  bool _tlsFallbackStarting = false;
   // Counts consecutive "ad: Error decoding audio." lines from mpv for the
   // current open. A single transient decode error is ignored; a sustained run
   // of them means mpv has no working decoder for this audio (AV3A on the
@@ -427,6 +438,23 @@ class PlaybackController extends ChangeNotifier {
       // means the bundled libmpv cannot decode it, so switch straight to the
       // AV3A-to-AAC bridge instead of playing on silently.
       final logText = log.text.toLowerCase();
+      // mpv's curl network layer refuses HTTPS origins whose TLS certificate
+      // can't be verified (self-signed/expired/untrusted CA), printing e.g.
+      // "TLS certificate verification failed" / "SSL peer certificate ... was
+      // not OK". Keep verification on by default, but the first time a stream
+      // hits this, disable it just for that stream and reconnect so mpv reopens
+      // the URL with tls-verify=no. Ignored once already disabled or for the
+      // local loopback converters (which never present remote certs).
+      final isTlsVerifyFailure =
+          logText.contains('certificate verification failed') ||
+          logText.contains('peer certificate') ||
+          logText.contains('tls-verify=no');
+      if (!_tlsVerifyDisabled &&
+          !_tlsFallbackStarting &&
+          nowPlaying != null &&
+          isTlsVerifyFailure) {
+        unawaited(_activateTlsVerifyFallback());
+      }
       final namesAv3a =
           logText.contains('av3a') &&
           (logText.contains('unknown') ||
@@ -450,6 +478,34 @@ class PlaybackController extends ChangeNotifier {
         unawaited(_activateAv3aFallback());
       }
     });
+  }
+
+  // Reopen the current stream with mpv's `tls-verify=no` after a TLS
+  // certificate verification failure. Marks the stream so _applyPlaybackOptions
+  // disables verification, then reconnects (which re-applies options and issues
+  // `loadfile replace`). Kept per-stream: play() resets the flag so a healthy
+  // channel always starts with verification back on.
+  Future<void> _activateTlsVerifyFallback() async {
+    if (_disposed || nowPlaying == null || _tlsVerifyDisabled) return;
+    _tlsFallbackStarting = true;
+    _tlsVerifyDisabled = true;
+    DebugLogService.instance.add(
+      'TLS certificate verification failed; retrying with tls-verify=no',
+      level: DebugLogLevel.warn,
+      source: 'app',
+    );
+    try {
+      // Force the options+reload path even if a frame was already rendered:
+      // treat this as a fresh open so the reconnect actually reopens the URL
+      // with the relaxed setting rather than being skipped.
+      _everPlayed = false;
+      reconnecting = true;
+      _reconnectAttempts = 0;
+      _reconnectTimer?.cancel();
+      _scheduleReconnect();
+    } finally {
+      _tlsFallbackStarting = false;
+    }
   }
 
   Future<void> _activateAv3aFallback() async {
@@ -830,6 +886,8 @@ class PlaybackController extends ChangeNotifier {
     _reconnectAttempts = 0;
     _av3aFallbackStarting = false;
     _audioDecodeErrorStreak = 0;
+    _tlsVerifyDisabled = false;
+    _tlsFallbackStarting = false;
     _everPlayed = false;
     _buffering = false;
     _startupStopwatch = Stopwatch()..start();
@@ -1120,7 +1178,10 @@ class PlaybackController extends ChangeNotifier {
       source: 'app',
     );
     try {
-      if (_reconnectAttempts > 1) {
+      // Re-apply options on any attempt after the first, and always when a TLS
+      // fallback is pending so the reopen actually carries tls-verify=no even
+      // on the first (zero-delay) retry.
+      if (_reconnectAttempts > 1 || _tlsVerifyDisabled) {
         await _applyPlaybackOptions(
           isHls: _activeIsHls,
           isAv3a: _activeIsAv3a,
@@ -1173,6 +1234,8 @@ class PlaybackController extends ChangeNotifier {
     _activeIsMmtTlv = false;
     _av3aFallbackStarting = false;
     _audioDecodeErrorStreak = 0;
+    _tlsVerifyDisabled = false;
+    _tlsFallbackStarting = false;
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
     unawaited(_av3aServer.stop());
@@ -1406,6 +1469,12 @@ class PlaybackController extends ChangeNotifier {
       // via HttpOverrides instead). An empty value clears any proxy left over
       // from a previously played channel.
       'http-proxy': _proxyForActiveStream(),
+      // TLS certificate verification. Left ON (mpv's default) so HTTPS origins
+      // are validated normally; only disabled per-stream after a verification
+      // failure (see _activateTlsVerifyFallback) so those self-signed/expired
+      // IPTV origins can still play. An explicit 'yes' also clears the relaxed
+      // setting left over from a previous channel.
+      'tls-verify': _tlsVerifyDisabled ? 'no' : 'yes',
     };
 
     for (final option in options.entries) {
