@@ -196,9 +196,10 @@ class Av3aStreamServer {
         '5000',
         '-i',
         _localPath(source),
-        // Preserve the source A/V relationship and shift both streams by the
-        // same amount. Resetting only audio to PTS 0 caused a fixed lip-sync
-        // offset on HLS channels whose first video PTS was non-zero.
+        // Keep the source PTS relationship. `-copyts` preserves original
+        // timestamps and `-start_at_zero` shifts both streams by the same
+        // amount, so a non-zero first video PTS (common on HLS) no longer
+        // offsets audio against video.
         '-copyts',
         '-start_at_zero',
         '-map',
@@ -211,6 +212,16 @@ class Av3aStreamServer {
         'copy',
         '-c:a',
         'aac',
+        // A/V sync is carried by PTS, so transcode latency alone should not
+        // desync anything. The residual drift comes from the AAC encoder's
+        // priming delay and resampling. Rather than guess a fixed offset, let
+        // the resampler align audio to the video timeline and continuously
+        // correct drift: async=1 stretches/pads to keep audio locked to its
+        // timestamps, and min_hard_comp bounds how large a gap is hard-cut vs.
+        // smoothly compensated. This is FFmpeg's standard sync mechanism and
+        // needs no magic constant.
+        '-af',
+        'aresample=async=1:min_hard_comp=0.100:first_pts=0',
         '-ac',
         '2',
         '-ar',
