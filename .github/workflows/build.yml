@@ -44,6 +44,18 @@ jobs:
           --build-name=${{ steps.meta.outputs.buildname }}
           --dart-define=RELEASE_TAG=${{ steps.meta.outputs.tag }}
 
+      - name: Verify AV3A decoder runtime
+        shell: pwsh
+        run: |
+          $ffmpeg = 'build/windows/x64/runner/Release/av3a_ffmpeg/ffmpeg.exe'
+          if (-not (Test-Path $ffmpeg)) {
+            throw 'AV3A FFmpeg runtime was not packaged'
+          }
+          $decoders = & $ffmpeg -hide_banner -decoders 2>&1 | Out-String
+          if ($decoders -notmatch 'libarcdav3a') {
+            throw 'Packaged FFmpeg does not contain the AV3A decoder'
+          }
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

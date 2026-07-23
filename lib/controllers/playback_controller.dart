@@ -11,6 +11,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../dash/dash_stream_server.dart';
 import '../models/playlist.dart';
+import '../services/av3a_stream_server.dart';
 import '../services/debug_log_service.dart';
 import '../services/mmt_tlv_stream_server.dart';
 import '../services/ping_service.dart';
@@ -47,14 +48,21 @@ class PlaybackController extends ChangeNotifier {
   // dantto4k remuxes ARIB MMT/TLV into MPEG-TS because FFmpeg/libmpv does not
   // provide an MMT/TLV demuxer. The loopback server keeps that native helper
   // outside the mpv process and can restart it for reconnects.
+  // AV3A (AVS3-P3 / Audio Vivid) is decoded by a dedicated FFmpeg build,
+  // remuxed with the untouched video, and exposed as synchronized Matroska.
+  final Av3aStreamServer _av3aServer = Av3aStreamServer();
   final MmtTlvStreamServer _mmtTlvServer = MmtTlvStreamServer();
   // The URL actually handed to mpv for the current channel: the origin URL for
-  // plain streams, or a loopback proxy URL for ClearKey DASH and MMT/TLV.
+  // plain streams, or a loopback proxy URL for ClearKey DASH, AV3A and MMT/TLV.
   // Used by the reconnect path so it reloads the right source.
   String _activeStreamUrl = '';
   // Retain format hints so reconnects re-apply the same lavf demuxer options.
   bool _activeIsHls = false;
+  bool _activeIsAv3a = false;
   bool _activeIsMmtTlv = false;
+  // Guards the log-triggered fallback: mpv can emit several AV3A warnings for
+  // one stream before the local transcoder has finished starting.
+  bool _av3aFallbackStarting = false;
 
   final TextEditingController streamUrlController = TextEditingController();
   final FocusNode playerFocusNode = FocusNode();
@@ -174,6 +182,7 @@ class PlaybackController extends ChangeNotifier {
     playerFocusNode.dispose();
     streamUrlController.dispose();
     _dashServer.dispose();
+    _av3aServer.dispose();
     _mmtTlvServer.dispose();
     player.dispose();
     _messages.close();
@@ -278,7 +287,12 @@ class PlaybackController extends ChangeNotifier {
     // while a channel is selected, transparently reconnect and keep playing.
     _completedSubscription = player.stream.completed.listen((completed) async {
       if (!completed) return;
-      if (_disposed || nowPlaying == null || reconnecting) return;
+      if (_disposed ||
+          nowPlaying == null ||
+          reconnecting ||
+          _av3aFallbackStarting) {
+        return;
+      }
       // Ignore the completed event that our own player.stop() triggers once a
       // failure has already been recorded.
       if (_failureLabel != null) return;
@@ -388,7 +402,64 @@ class PlaybackController extends ChangeNotifier {
       if (log.level == 'error' && log.prefix == 'ytdl_hook') {
         _lastYtdlHookErrorAt = DateTime.now();
       }
+      // Some HLS master/media playlists omit CODECS, so the HTTP prefix probe
+      // cannot know they contain AV3A. libmpv still exposes the codec tag in
+      // its demuxer warning; use that as a definitive late signal and reopen
+      // the same source through the AV3A-to-AAC bridge once.
+      final logText = log.text.toLowerCase();
+      if (!_activeIsAv3a &&
+          !_av3aFallbackStarting &&
+          logText.contains('av3a') &&
+          (logText.contains('unknown') ||
+              logText.contains('could not find codec parameters'))) {
+        unawaited(_activateAv3aFallback());
+      }
     });
+  }
+
+  Future<void> _activateAv3aFallback() async {
+    final channel = nowPlaying;
+    if (_disposed ||
+        channel == null ||
+        _activeIsAv3a ||
+        _av3aFallbackStarting) {
+      return;
+    }
+    final request = playbackRequest;
+    final source = _activeStreamUrl.isNotEmpty ? _activeStreamUrl : channel.url;
+    final proxyUrl = _proxyForActiveStream();
+    _av3aFallbackStarting = true;
+    debugPrint('AV3A detected by libmpv; switching to the Audio Vivid decoder');
+    DebugLogService.instance.add(
+      'AV3A detected by libmpv; switching to the Audio Vivid decoder',
+      source: 'app',
+    );
+    try {
+      final bridgeUrl = await _av3aServer.start(
+        source,
+        proxyUrl: proxyUrl.isEmpty ? null : proxyUrl,
+      );
+      if (_disposed || request != playbackRequest || nowPlaying == null) {
+        await _av3aServer.stop();
+        return;
+      }
+      _activeStreamUrl = bridgeUrl;
+      _activeIsHls = false;
+      _activeIsAv3a = true;
+      await _applyPlaybackOptions(isAv3a: true, isMmtTlv: _activeIsMmtTlv);
+      if (_disposed || request != playbackRequest) return;
+      await player.open(Media(bridgeUrl));
+      _engineDirty = true;
+      await _applyVolumeToEngine();
+    } catch (error) {
+      DebugLogService.instance.add(
+        'Failed to activate AV3A decoder: $error',
+        level: DebugLogLevel.error,
+        source: 'app',
+      );
+    } finally {
+      if (request == playbackRequest) _av3aFallbackStarting = false;
+    }
   }
 
   // Drop the current freeze frame and evict its decoded bitmap from the global
@@ -440,16 +511,27 @@ class PlaybackController extends ChangeNotifier {
   //     unwrapped inner URL, so mpv opens the media directly instead of running
   //     its plaintext-playlist reader against a non-seekable live stream (which
   //     floods the log with curl backward-seek errors and stalls playback).
+  //   isAv3a is true when the manifest, MP4 sample entry, raw extension, or
+  //     MPEG-TS PMT identifies AVS3-P3 / Audio Vivid audio.
   //   isHls is true for a real HLS manifest, so the caller can force mpv's
   //     lavf/HLS demuxer instead of letting mpv misdetect it as a plaintext
   //     playlist.
-  Future<({bool nativeSafe, bool isHls, bool isMmtTlv, String? mediaUrl})>
+  Future<
+    ({
+      bool nativeSafe,
+      bool isHls,
+      bool isAv3a,
+      bool isMmtTlv,
+      String? mediaUrl,
+    })
+  >
   _probeStream(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null || !(uri.isScheme('http') || uri.isScheme('https'))) {
       return (
         nativeSafe: true,
         isHls: false,
+        isAv3a: url.toLowerCase().endsWith('.av3a'),
         isMmtTlv: isMmtTlvSource(url),
         mediaUrl: null,
       );
@@ -477,6 +559,7 @@ class PlaybackController extends ChangeNotifier {
         bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes,
         allowMalformed: true,
       );
+      final isAv3a = looksLikeAv3a(url, bytes, head);
       final looksDash =
           contentType.contains('dash+xml') ||
           head.contains('<MPD') ||
@@ -485,6 +568,7 @@ class PlaybackController extends ChangeNotifier {
         return (
           nativeSafe: false,
           isHls: false,
+          isAv3a: isAv3a,
           isMmtTlv: false,
           mediaUrl: null,
         );
@@ -495,16 +579,37 @@ class PlaybackController extends ChangeNotifier {
       // (which plays segments one-by-one and floods the log with curl
       // backward-seek errors on a live sliding-window stream).
       final trimmed = head.trimLeft();
+      final hasHlsTags =
+          trimmed.startsWith('#EXTM3U') && head.contains('#EXT-X-');
+      // A Content-Type ending in mpegurl is not sufficient: many providers
+      // serve a one-line M3U redirect with that same type. Resolve that wrapper
+      // first so both libmpv and the AV3A fallback receive the actual HLS URL.
+      if (trimmed.startsWith('#EXTM3U') && !hasHlsTags) {
+        return (
+          nativeSafe: true,
+          isHls: false,
+          isAv3a: isAv3a,
+          isMmtTlv: false,
+          mediaUrl: _unwrapPlaintextPlaylist(head, uri),
+        );
+      }
       final isHls =
-          (trimmed.startsWith('#EXTM3U') && head.contains('#EXT-X-')) ||
+          hasHlsTags ||
           contentType.contains('mpegurl') ||
           contentType.contains('vnd.apple.mpegurl');
       if (isHls) {
-        return (nativeSafe: true, isHls: true, isMmtTlv: false, mediaUrl: null);
+        return (
+          nativeSafe: true,
+          isHls: true,
+          isAv3a: isAv3a,
+          isMmtTlv: false,
+          mediaUrl: null,
+        );
       }
       return (
         nativeSafe: true,
         isHls: false,
+        isAv3a: isAv3a,
         isMmtTlv:
             isMmtTlvSource(url) ||
             isMmtTlvContentType(contentType) ||
@@ -550,6 +655,7 @@ class PlaybackController extends ChangeNotifier {
     _connectTimer?.cancel();
     reconnecting = false;
     _reconnectAttempts = 0;
+    _av3aFallbackStarting = false;
     _everPlayed = false;
     _buffering = false;
     _startupStopwatch = Stopwatch()..start();
@@ -589,8 +695,9 @@ class PlaybackController extends ChangeNotifier {
       await player.stop();
     }
     if (_disposed || request != playbackRequest) return;
-    // Stop any converter left by the previous channel before preparing this one.
-    await _mmtTlvServer.stop();
+    // Stop any native converter left by the previous channel before preparing
+    // this one.
+    await Future.wait([_av3aServer.stop(), _mmtTlvServer.stop()]);
     if (_disposed || request != playbackRequest) return;
 
     // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the
@@ -637,6 +744,7 @@ class PlaybackController extends ChangeNotifier {
     // manifest.
     var nativeSafe = true;
     var isHls = false;
+    var isAv3a = false;
     var isMmtTlv =
         isMmtTlvSource(channel.url) ||
         const {
@@ -649,6 +757,7 @@ class PlaybackController extends ChangeNotifier {
         final probe = await _probeStream(channel.url);
         nativeSafe = probe.nativeSafe;
         isHls = probe.isHls;
+        isAv3a = probe.isAv3a;
         isMmtTlv = isMmtTlv || probe.isMmtTlv;
         if (probe.mediaUrl != null && probe.mediaUrl != streamUrl) {
           debugPrint('Unwrapped plaintext playlist -> ${probe.mediaUrl}');
@@ -691,10 +800,39 @@ class PlaybackController extends ChangeNotifier {
       }
     }
 
+    if (isAv3a) {
+      try {
+        streamUrl = await _av3aServer.start(
+          streamUrl,
+          proxyUrl: ProxyService.mpvProxyUrl(),
+        );
+        isHls = false;
+        DebugLogService.instance.add(
+          'AV3A Audio Vivid transcoder started',
+          source: 'app',
+        );
+      } catch (error) {
+        DebugLogService.instance.add(
+          'AV3A transcoder failed to start: $error',
+          level: DebugLogLevel.error,
+          source: 'app',
+        );
+        if (_disposed || request != playbackRequest) return;
+        _failureLabel = 'Load error';
+        notifyListeners();
+        return;
+      }
+    }
+
     _activeStreamUrl = streamUrl;
     _activeIsHls = isHls;
+    _activeIsAv3a = isAv3a;
     _activeIsMmtTlv = isMmtTlv;
-    await _applyPlaybackOptions(isHls: isHls, isMmtTlv: isMmtTlv);
+    await _applyPlaybackOptions(
+      isHls: isHls,
+      isAv3a: isAv3a,
+      isMmtTlv: isMmtTlv,
+    );
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
     _engineDirty = true;
@@ -811,6 +949,7 @@ class PlaybackController extends ChangeNotifier {
       if (_reconnectAttempts > 1) {
         await _applyPlaybackOptions(
           isHls: _activeIsHls,
+          isAv3a: _activeIsAv3a,
           isMmtTlv: _activeIsMmtTlv,
         );
         if (_disposed || request != playbackRequest) return;
@@ -856,9 +995,12 @@ class PlaybackController extends ChangeNotifier {
     _ytdlGraceTimer = null;
     _activeStreamUrl = '';
     _activeIsHls = false;
+    _activeIsAv3a = false;
     _activeIsMmtTlv = false;
+    _av3aFallbackStarting = false;
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
+    unawaited(_av3aServer.stop());
     unawaited(_mmtTlvServer.stop());
     streamUrlController.clear();
     // Tear the engine down entirely rather than just pausing it. media_kit's
@@ -1031,6 +1173,7 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _applyPlaybackOptions({
     bool isHls = false,
+    bool isAv3a = false,
     bool isMmtTlv = false,
   }) async {
     final platform = player.platform;
@@ -1051,11 +1194,11 @@ class PlaybackController extends ChangeNotifier {
       // log with "youtube-dl failed: not found". Turn it off so a failed stream
       // fails fast and cleanly.
       'ytdl': 'no',
-      // Force FFmpeg's demuxer for HLS and for the MPEG-TS stream produced by
-      // the MMT/TLV converter. Cleared for other formats so normal probing is
-      // unaffected when switching channels.
-      'demuxer': (isHls || isMmtTlv) ? 'lavf' : '',
-      'demuxer-lavf-format': isMmtTlv ? 'mpegts' : '',
+      // Force FFmpeg's demuxer for HLS and for the local streams produced by
+      // the AV3A (Matroska) and MMT/TLV (MPEG-TS) converters. Cleared for other
+      // formats so normal probing is unaffected when switching channels.
+      'demuxer': (isHls || isAv3a || isMmtTlv) ? 'lavf' : '',
+      'demuxer-lavf-format': isAv3a ? 'matroska' : (isMmtTlv ? 'mpegts' : ''),
       // Deinterlacing is handled via an explicit video filter (see
       // _applyDeinterlaceFilter), applied after the option loop so the filter
       // string can be swapped live without a reload. Nothing to set here.
@@ -1132,7 +1275,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _applyInterpolationForFps(double fps) async {
     final platform = player.platform;
     if (platform == null) return;
-    final enable = fps > 0 && fps < 40;
+    final enable = !_activeIsAv3a && fps > 0 && fps < 40;
     try {
       await (platform as dynamic).setProperty(
         'video-sync',

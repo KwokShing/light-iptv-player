@@ -271,6 +271,59 @@ else()
     "using media_kit's bundled (non-DASH) build.")
 endif()
 
+# === AV3A (AVS3-P3 / Audio Vivid) decoder bridge (Windows x64) ===
+# Upstream FFmpeg/libmpv does not decode China's AV3A format. A dedicated
+# FFmpeg build decodes AV3A to AAC while stream-copying video; Dart exposes the
+# synchronized MPEG-TS output to the existing libmpv over loopback HTTP.
+# Keep this artifact pinned: it is third-party software with no license file in
+# its release, so downstream distributors must review its terms independently.
+option(ENABLE_AV3A_SUPPORT "Bundle the third-party AV3A decoder bridge" ON)
+set(AV3A_FFMPEG_URL
+  "https://github.com/raddyfiy/av3a_ffmpeg_decoder/releases/download/v1.0/av3a.mpv.7z")
+set(AV3A_FFMPEG_SHA256
+  "f1c545b528e403b4740d645896b6a08c677e8e3828fbe9aa90e3e3f3444c040f")
+set(AV3A_FFMPEG_ARCHIVE "${CMAKE_BINARY_DIR}/av3a-mpv-v1.0.7z")
+set(AV3A_FFMPEG_DIR "${CMAKE_BINARY_DIR}/av3a_ffmpeg")
+set(AV3A_FFMPEG_EXE "${AV3A_FFMPEG_DIR}/ffmpeg.exe")
+set(AV3A_FFMPEG_NOTICE "${AV3A_FFMPEG_DIR}/NOTICE.txt")
+
+if(ENABLE_AV3A_SUPPORT AND NOT EXISTS "${AV3A_FFMPEG_EXE}")
+  file(DOWNLOAD "${AV3A_FFMPEG_URL}" "${AV3A_FFMPEG_ARCHIVE}"
+    EXPECTED_HASH SHA256=${AV3A_FFMPEG_SHA256}
+    TLS_VERIFY ON SHOW_PROGRESS STATUS AV3A_FFMPEG_DOWNLOAD_STATUS)
+  list(GET AV3A_FFMPEG_DOWNLOAD_STATUS 0 AV3A_FFMPEG_DOWNLOAD_CODE)
+  if(AV3A_FFMPEG_DOWNLOAD_CODE EQUAL 0)
+    file(REMOVE_RECURSE "${AV3A_FFMPEG_DIR}")
+    file(MAKE_DIRECTORY "${AV3A_FFMPEG_DIR}")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar xf "${AV3A_FFMPEG_ARCHIVE}"
+      WORKING_DIRECTORY "${AV3A_FFMPEG_DIR}"
+      RESULT_VARIABLE AV3A_FFMPEG_EXTRACT_RESULT)
+    if(NOT AV3A_FFMPEG_EXTRACT_RESULT EQUAL 0)
+      message(WARNING "Failed to extract the AV3A FFmpeg runtime.")
+    endif()
+  else()
+    list(GET AV3A_FFMPEG_DOWNLOAD_STATUS 1 AV3A_FFMPEG_DOWNLOAD_MESSAGE)
+    message(WARNING "Failed to download AV3A FFmpeg: ${AV3A_FFMPEG_DOWNLOAD_MESSAGE}")
+    file(REMOVE "${AV3A_FFMPEG_ARCHIVE}")
+  endif()
+endif()
+
+if(ENABLE_AV3A_SUPPORT AND EXISTS "${AV3A_FFMPEG_EXE}")
+  file(WRITE "${AV3A_FFMPEG_NOTICE}"
+    "AV3A decoder runtime\nSource: ${AV3A_FFMPEG_URL}\nSHA-256: ${AV3A_FFMPEG_SHA256}\nThe upstream release provides no license file. Review redistribution rights before distributing this optional component.\n")
+  install(FILES "${AV3A_FFMPEG_EXE}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/av3a_ffmpeg" COMPONENT Runtime)
+  install(DIRECTORY "${AV3A_FFMPEG_DIR}/"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}/av3a_ffmpeg" COMPONENT Runtime
+    FILES_MATCHING PATTERN "*.dll" PATTERN "*.so")
+  install(FILES "${AV3A_FFMPEG_NOTICE}"
+    DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/licenses/av3a_ffmpeg"
+    COMPONENT Runtime)
+else()
+  message(WARNING "AV3A runtime unavailable; Audio Vivid streams will be silent.")
+endif()
+
 # === MMT/TLV to MPEG-TS converter (Windows x64) ===
 # FFmpeg/libmpv has no ARIB MMT/TLV demuxer. dantto4k's latest Windows CI
 # artifact supports already-descrambled HTTP streams; the v1.0.2-rc1 release
