@@ -260,12 +260,12 @@ class PlaybackController extends ChangeNotifier {
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
-        // `auto-copy` keeps hardware decoding but copies decoded frames back to
-        // system memory instead of sharing a D3D11 texture directly with ANGLE.
-        // The zero-copy interop path (`auto`) crashes the native process on
-        // Windows for some IPTV codecs/resolutions; the copy path is far more
-        // robust at a small upload cost.
-        hwdec: 'auto-copy',
+        // `auto` uses the zero-copy interop path: hardware-decoded frames stay
+        // in GPU memory and are shared with ANGLE directly (no readback), which
+        // is the cheapest path. Note: on Windows this interop has been known to
+        // crash the native process for some IPTV codecs/resolutions; if that
+        // resurfaces, switch back to `auto-copy` (hardware decode + readback).
+        hwdec: 'auto',
         enableHardwareAcceleration: true,
       ),
     );
@@ -1360,7 +1360,7 @@ class PlaybackController extends ChangeNotifier {
     // are very expensive at 4K60 and noticeably delay first frame.
     _interpolationConfigured = false;
     final options = {
-      'hwdec': 'auto-copy',
+      'hwdec': 'auto',
       'interpolation': 'no',
       'video-sync': 'audio',
       // youtube-dl / yt-dlp is not bundled with the app, so mpv's ytdl_hook can
@@ -1483,8 +1483,8 @@ class PlaybackController extends ChangeNotifier {
 
   // Apply (or clear) the deinterlacer. mpv's default `deinterlace=yes` runs
   // yadif in `send_field` mode, which doubles the output frame rate (50i -> 50p)
-  // — that frame doubling, on top of the `auto-copy` hwdec path that already
-  // copies frames back to system RAM, is what makes playback stutter like a
+  // — that frame doubling, on top of the per-frame upload cost of the hwdec
+  // path, is what makes playback stutter like a
   // slideshow. Instead use the faster `bwdif` filter in `send_frame` mode so
   // one deinterlaced frame is produced per input field pair (output fps stays
   // the same). This keeps the CPU cost low while still removing combing.
