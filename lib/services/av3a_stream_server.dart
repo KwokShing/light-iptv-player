@@ -18,7 +18,27 @@ bool looksLikeAv3a(String source, List<int> bytes, String text) {
       lower.contains('audio vivid')) {
     return true;
   }
+  // The 'av3a' fourcc (0x61 0x76 0x33 0x61) marks the codec in an MP4/fMP4
+  // sample-entry box. A binary init segment decoded as text can lose it to
+  // replacement characters, so scan the raw bytes directly as a backstop.
+  if (_containsAscii(bytes, const [0x61, 0x76, 0x33, 0x61])) return true;
   return _mpegTsContainsAv3a(bytes);
+}
+
+bool _containsAscii(List<int> bytes, List<int> needle) {
+  if (needle.isEmpty || bytes.length < needle.length) return false;
+  final last = bytes.length - needle.length;
+  for (var i = 0; i <= last; i++) {
+    var matched = true;
+    for (var j = 0; j < needle.length; j++) {
+      if (bytes[i + j] != needle[j]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) return true;
+  }
+  return false;
 }
 
 bool _mpegTsContainsAv3a(List<int> bytes) {
@@ -161,10 +181,19 @@ class Av3aStreamServer {
           '-http_proxy',
           _proxyUrl!,
         ],
+        // A live HLS AV3A service can present its audio stream sparsely, so the
+        // audio elementary stream may not appear inside a small initial probe
+        // window. When FFmpeg finishes probing without having seen it, the
+        // optional `-map 0:a:0?` below silently produces a video-only output —
+        // the "sometimes no sound" symptom. Probe generously (100 MB / 30 s)
+        // and raise the analyzed-packet ceiling so the AV3A audio stream is
+        // reliably discovered before mapping.
         '-analyzeduration',
-        '10000000',
+        '30000000',
         '-probesize',
-        '10000000',
+        '100000000',
+        '-max_probe_packets',
+        '5000',
         '-i',
         _localPath(source),
         // Preserve the source A/V relationship and shift both streams by the

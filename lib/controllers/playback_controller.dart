@@ -63,6 +63,12 @@ class PlaybackController extends ChangeNotifier {
   // Guards the log-triggered fallback: mpv can emit several AV3A warnings for
   // one stream before the local transcoder has finished starting.
   bool _av3aFallbackStarting = false;
+  // Counts consecutive "ad: Error decoding audio." lines from mpv for the
+  // current open. A single transient decode error is ignored; a sustained run
+  // of them means mpv has no working decoder for this audio (AV3A on the
+  // bundled libmpv), which triggers the AV3A bridge fallback.
+  int _audioDecodeErrorStreak = 0;
+  static const _av3aDecodeErrorThreshold = 3;
 
   final TextEditingController streamUrlController = TextEditingController();
   final FocusNode playerFocusNode = FocusNode();
@@ -236,9 +242,14 @@ class PlaybackController extends ChangeNotifier {
     final nextPlayer = Player(
       configuration: const PlayerConfiguration(
         title: 'Light IPTV Player',
-        // Keep mpv logs at warning level: real problems still surface, but the
-        // verbose per-frame/demuxer chatter used while diagnosing is gone.
-        logLevel: MPVLogLevel.warn,
+        // Deliver mpv logs at info level. The AV3A "Could not find codec
+        // parameters for stream N (... av3a ...)" line from the lavf/hls
+        // demuxer — the one definitive runtime AV3A signal — is emitted below
+        // `warn`, so a `warn` filter dropped it and the AV3A fallback never
+        // fired (the same stream would then play silently). `info` guarantees
+        // that line reaches player.stream.log; the extra chatter is filtered in
+        // the log listener before it reaches the debug UI.
+        logLevel: MPVLogLevel.info,
         // Forward read-ahead cache. media_kit turns this into mpv's
         // `demuxer-max-bytes`. Sized generously here (overridden per-stream in
         // _applyPlaybackOptions) so DASH playback can buffer many seconds and
@@ -394,24 +405,48 @@ class PlaybackController extends ChangeNotifier {
         'warn' => DebugLogLevel.warn,
         _ => DebugLogLevel.info,
       };
-      DebugLogService.instance.add(
-        '${log.prefix}: ${log.text}',
-        level: level,
-        source: 'mpv',
-      );
+      // mpv now runs at `info` so the definitive AV3A codec-parameter line is
+      // delivered (see _createPlaybackEngine), but the debug UI should still
+      // only surface real problems. Keep warn/error/fatal; drop routine info
+      // chatter so the log panel is not flooded.
+      if (log.level != 'info' && log.level != 'v' && log.level != 'debug') {
+        DebugLogService.instance.add(
+          '${log.prefix}: ${log.text}',
+          level: level,
+          source: 'mpv',
+        );
+      }
       if (log.level == 'error' && log.prefix == 'ytdl_hook') {
         _lastYtdlHookErrorAt = DateTime.now();
       }
-      // Some HLS master/media playlists omit CODECS, so the HTTP prefix probe
-      // cannot know they contain AV3A. libmpv still exposes the codec tag in
-      // its demuxer warning; use that as a definitive late signal and reopen
-      // the same source through the AV3A-to-AAC bridge once.
+      // The lavf/hls demuxer emits a definitive AV3A signal the moment it
+      // fails to map the stream, e.g.
+      //   "Could not find codec parameters for stream 1
+      //    (Unknown: none (av3a / 0x61337661)): unknown codec".
+      // Any log line mentioning the av3a codec in a "can't handle it" context
+      // means the bundled libmpv cannot decode it, so switch straight to the
+      // AV3A-to-AAC bridge instead of playing on silently.
       final logText = log.text.toLowerCase();
-      if (!_activeIsAv3a &&
-          !_av3aFallbackStarting &&
+      final namesAv3a =
           logText.contains('av3a') &&
           (logText.contains('unknown') ||
-              logText.contains('could not find codec parameters'))) {
+              logText.contains('could not find codec parameters') ||
+              logText.contains('unknown codec') ||
+              logText.contains('no decoder'));
+      // A sustained run of "ad: Error decoding audio." is the other AV3A
+      // symptom: mpv recognized the codec but has no decoder, so it just fails
+      // every audio packet without ever naming av3a. A lone transient glitch on
+      // a normal stream is ignored via the streak threshold.
+      final isAudioDecodeError =
+          log.prefix == 'ad' && logText.contains('error decoding audio');
+      _audioDecodeErrorStreak = isAudioDecodeError
+          ? _audioDecodeErrorStreak + 1
+          : 0;
+      final failedAudioDecode =
+          _audioDecodeErrorStreak >= _av3aDecodeErrorThreshold;
+      if (!_activeIsAv3a &&
+          !_av3aFallbackStarting &&
+          (namesAv3a || failedAudioDecode)) {
         unawaited(_activateAv3aFallback());
       }
     });
@@ -429,6 +464,7 @@ class PlaybackController extends ChangeNotifier {
     final source = _activeStreamUrl.isNotEmpty ? _activeStreamUrl : channel.url;
     final proxyUrl = _proxyForActiveStream();
     _av3aFallbackStarting = true;
+    _audioDecodeErrorStreak = 0;
     debugPrint('AV3A detected by libmpv; switching to the Audio Vivid decoder');
     DebugLogService.instance.add(
       'AV3A detected by libmpv; switching to the Audio Vivid decoder',
@@ -446,6 +482,14 @@ class PlaybackController extends ChangeNotifier {
       _activeStreamUrl = bridgeUrl;
       _activeIsHls = false;
       _activeIsAv3a = true;
+      // The direct stream already rendered video, so `_everPlayed` is true.
+      // Reopening through the bridge is effectively a fresh open: treat it as
+      // one so the brief gap before the bridge's first packet is seen as a
+      // startup, not a mid-stream stall that trips a reconnect to the (now
+      // stale) direct URL. Reconnect bookkeeping is reset for the same reason.
+      _everPlayed = false;
+      _reconnectAttempts = 0;
+      _reconnectTimer?.cancel();
       await _applyPlaybackOptions(isAv3a: true, isMmtTlv: _activeIsMmtTlv);
       if (_disposed || request != playbackRequest) return;
       await player.open(Media(bridgeUrl));
@@ -538,10 +582,16 @@ class PlaybackController extends ChangeNotifier {
     }
     final client = http.Client();
     try {
+      // Pull a larger prefix than a single TS PMT interval. 8 KiB frequently
+      // fell inside a live sliding window that had not yet emitted the PMT
+      // (stream_type 0xD5) or the manifest CODECS tag, so AV3A detection was a
+      // coin flip and the same stream would sometimes bypass the bridge. 64 KiB
+      // reliably spans several PMT repetitions and full media manifests.
+      const probeBytes = 64 * 1024;
       final request = http.Request('GET', uri)
         ..followRedirects = true
         ..headers['User-Agent'] = UserAgentService.resolve('Mozilla/5.0')
-        ..headers['Range'] = 'bytes=0-8191';
+        ..headers['Range'] = 'bytes=0-${probeBytes - 1}';
       final response = await client
           .send(request)
           .timeout(const Duration(seconds: 6));
@@ -549,16 +599,17 @@ class PlaybackController extends ChangeNotifier {
           .toLowerCase();
       final bytes = <int>[];
       await for (final chunk in response.stream) {
-        final remaining = 8192 - bytes.length;
+        final remaining = probeBytes - bytes.length;
         bytes.addAll(
           chunk.length <= remaining ? chunk : chunk.sublist(0, remaining),
         );
-        if (bytes.length >= 8192) break;
+        if (bytes.length >= probeBytes) break;
       }
-      final head = utf8.decode(
-        bytes.length > 4096 ? bytes.sublist(0, 4096) : bytes,
-        allowMalformed: true,
-      );
+      // Decode the whole prefix as text (malformed bytes tolerated). The HLS /
+      // plaintext-playlist checks below only look at the leading line, but the
+      // AV3A CODECS tag can sit deep inside a large master manifest, so the
+      // text signalling scan needs the full prefix.
+      final head = utf8.decode(bytes, allowMalformed: true);
       final isAv3a = looksLikeAv3a(url, bytes, head);
       final looksDash =
           contentType.contains('dash+xml') ||
@@ -598,10 +649,18 @@ class PlaybackController extends ChangeNotifier {
           contentType.contains('mpegurl') ||
           contentType.contains('vnd.apple.mpegurl');
       if (isHls) {
+        // An HLS manifest lists segment URLs but almost never carries the AV3A
+        // signal itself (no CODECS attribute on these services), so the prefix
+        // scan above can't see it — mpv then opens the stream, silently fails
+        // to decode AV3A, and prints the codec warning only to its own terminal
+        // (it never reaches player.stream.log). Resolve the manifest down to
+        // its first media segment and scan THAT for the AV3A PMT / fourcc so we
+        // pick the decoder bridge before mpv ever opens the stream.
+        final segmentAv3a = isAv3a || await _hlsSegmentIsAv3a(head, uri, client);
         return (
           nativeSafe: true,
           isHls: true,
-          isAv3a: isAv3a,
+          isAv3a: segmentAv3a,
           isMmtTlv: false,
           mediaUrl: null,
         );
@@ -618,6 +677,120 @@ class PlaybackController extends ChangeNotifier {
       );
     } finally {
       client.close();
+    }
+  }
+
+  // Resolves an HLS manifest down to its first media segment and scans that
+  // segment's bytes for the AV3A signal (MPEG-TS PMT stream_type 0xD5 or the
+  // 'av3a' fourcc in an fMP4 sample entry). The AV3A codec is carried in the
+  // media, not the manifest text, so this is the only reliable way to know
+  // before handing the stream to mpv. Follows one level of master -> media
+  // playlist. Best-effort: any failure returns false so a healthy channel is
+  // never blocked.
+  Future<bool> _hlsSegmentIsAv3a(
+    String manifest,
+    Uri manifestUri,
+    http.Client client,
+  ) async {
+    try {
+      var playlist = manifest;
+      var baseUri = manifestUri;
+      // If this is a master playlist (variant streams, no segments), descend
+      // into the first variant's media playlist first.
+      final firstVariant = _firstHlsUri(
+        playlist,
+        baseUri,
+        wantVariant: true,
+      );
+      if (firstVariant != null) {
+        final variantBody = await _fetchText(firstVariant, client);
+        if (variantBody != null) {
+          playlist = variantBody;
+          baseUri = firstVariant;
+        }
+      }
+      // An fMP4 variant declares its init segment via #EXT-X-MAP:URI="...";
+      // that box carries the sample-entry fourcc. Prefer it, else the first
+      // media segment.
+      final mapUri = _hlsMapUri(playlist, baseUri);
+      final segmentUri =
+          mapUri ?? _firstHlsUri(playlist, baseUri, wantVariant: false);
+      if (segmentUri == null) return false;
+      final bytes = await _fetchBytes(segmentUri, client, 64 * 1024);
+      if (bytes == null || bytes.isEmpty) return false;
+      final text = utf8.decode(bytes, allowMalformed: true);
+      return looksLikeAv3a(segmentUri.toString(), bytes, text);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // First URI in an HLS playlist. When [wantVariant] is true, returns the first
+  // #EXT-X-STREAM-INF variant URI (a nested playlist); otherwise the first
+  // media segment URI (the first non-comment line, which follows #EXTINF).
+  Uri? _firstHlsUri(String playlist, Uri base, {required bool wantVariant}) {
+    final lines = const LineSplitter().convert(playlist);
+    var previousWasStreamInf = false;
+    for (final raw in lines) {
+      final line = raw.trim();
+      if (line.isEmpty) continue;
+      if (line.startsWith('#')) {
+        previousWasStreamInf = line.startsWith('#EXT-X-STREAM-INF');
+        continue;
+      }
+      // A bare URI line. For variants it must follow #EXT-X-STREAM-INF; for
+      // media segments any bare line is one.
+      if (wantVariant && !previousWasStreamInf) {
+        previousWasStreamInf = false;
+        continue;
+      }
+      final resolved = base.resolve(line);
+      if (resolved.isScheme('http') || resolved.isScheme('https')) {
+        return resolved;
+      }
+      previousWasStreamInf = false;
+    }
+    return null;
+  }
+
+  // The #EXT-X-MAP:URI="..." init-segment URI, if present (fMP4 variants).
+  Uri? _hlsMapUri(String playlist, Uri base) {
+    final match = RegExp(
+      r'#EXT-X-MAP:[^\n]*URI="([^"]+)"',
+      caseSensitive: false,
+    ).firstMatch(playlist);
+    if (match == null) return null;
+    final resolved = base.resolve(match.group(1)!);
+    return (resolved.isScheme('http') || resolved.isScheme('https'))
+        ? resolved
+        : null;
+  }
+
+  Future<String?> _fetchText(Uri uri, http.Client client) async {
+    final bytes = await _fetchBytes(uri, client, 256 * 1024);
+    return bytes == null ? null : utf8.decode(bytes, allowMalformed: true);
+  }
+
+  Future<List<int>?> _fetchBytes(Uri uri, http.Client client, int cap) async {
+    try {
+      final request = http.Request('GET', uri)
+        ..followRedirects = true
+        ..headers['User-Agent'] = UserAgentService.resolve('Mozilla/5.0')
+        ..headers['Range'] = 'bytes=0-${cap - 1}';
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 6));
+      final bytes = <int>[];
+      await for (final chunk in response.stream) {
+        final remaining = cap - bytes.length;
+        bytes.addAll(
+          chunk.length <= remaining ? chunk : chunk.sublist(0, remaining),
+        );
+        if (bytes.length >= cap) break;
+      }
+      return bytes;
+    } catch (_) {
+      return null;
     }
   }
 
@@ -656,6 +829,7 @@ class PlaybackController extends ChangeNotifier {
     reconnecting = false;
     _reconnectAttempts = 0;
     _av3aFallbackStarting = false;
+    _audioDecodeErrorStreak = 0;
     _everPlayed = false;
     _buffering = false;
     _startupStopwatch = Stopwatch()..start();
@@ -998,6 +1172,7 @@ class PlaybackController extends ChangeNotifier {
     _activeIsAv3a = false;
     _activeIsMmtTlv = false;
     _av3aFallbackStarting = false;
+    _audioDecodeErrorStreak = 0;
     _clearFreezeFrame();
     unawaited(_dashServer.stop());
     unawaited(_av3aServer.stop());
