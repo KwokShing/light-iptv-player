@@ -267,6 +267,10 @@ class ChannelLogo extends StatelessWidget {
   // while scrolling (painting from memory is cheap and never re-downloads).
   static final Set<String> _loadedUrls = <String>{};
 
+  /// Keeps the session bookkeeping in sync when decoded channel artwork is
+  /// evicted after closing the player page.
+  static void clearMemoryCache() => _loadedUrls.clear();
+
   @override
   Widget build(BuildContext context) {
     final hasLogo = url != null && url!.isNotEmpty;

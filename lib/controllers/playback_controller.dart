@@ -33,11 +33,20 @@ class PlaybackController extends ChangeNotifier {
     _listenPlaybackInfo();
   }
 
-  late Player player;
-  late VideoController videoController;
-  // Bumped every time the engine is recreated. The player page keys its `Video`
-  // widget with this so a fresh Video State binds to the new VideoController
-  // (media_kit's Video does not rebind a swapped controller in didUpdateWidget).
+  Player? _player;
+  Player get player => _player!;
+  set player(Player value) => _player = value;
+
+  VideoController? _videoController;
+  VideoController get videoController => _videoController!;
+  set videoController(VideoController value) => _videoController = value;
+
+  bool _engineReleased = false;
+  bool get hasPlaybackEngine => _player != null;
+  // Bumped every time the engine is recreated or fully released. The player
+  // page keys its `Video` widget with this so a fresh Video State binds to the
+  // new VideoController (media_kit's Video does not rebind a swapped controller
+  // in didUpdateWidget).
   int _engineGeneration = 0;
   int get engineGeneration => _engineGeneration;
 
@@ -202,7 +211,10 @@ class PlaybackController extends ChangeNotifier {
     _dashServer.dispose();
     _av3aServer.dispose();
     _mmtTlvServer.dispose();
-    unawaited(player.dispose());
+    final activePlayer = _player;
+    _player = null;
+    _videoController = null;
+    if (activePlayer != null) unawaited(activePlayer.dispose());
     _messages.close();
     super.dispose();
   }
@@ -251,6 +263,34 @@ class PlaybackController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _restoreEngine() {
+    if (!_engineReleased) return;
+    final engine = _createPlaybackEngine();
+    player = engine.$1;
+    videoController = engine.$2;
+    _engineReleased = false;
+    _engineDirty = false;
+    _engineGeneration++;
+    _listenPlaybackInfo();
+  }
+
+  /// Releases the native player without replacing it. This is used when
+  /// returning home, where keeping a blank libmpv instance and Flutter texture
+  /// alive serves no purpose. [play] restores an engine lazily when needed.
+  Future<void> _releaseEngine() async {
+    if (_engineReleased) return;
+    await _cancelStreamSubscriptions();
+    final old = player;
+    _player = null;
+    _videoController = null;
+    _engineReleased = true;
+    _engineDirty = false;
+    _engineGeneration++;
+    try {
+      await old.dispose();
+    } catch (_) {}
+  }
+
   /// Disposes the current engine and installs a fresh blank one. Frees the
   /// native render context and unregisters the Flutter texture (dropping the
   /// last decoded frame the texture retains by design), then rebinds the UI via
@@ -259,18 +299,20 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _swapEngine() async {
     await _cancelStreamSubscriptions();
     final old = player;
-    final engine = _createPlaybackEngine();
-    player = engine.$1;
-    videoController = engine.$2;
-    _engineDirty = false;
-    _engineGeneration++;
-    _listenPlaybackInfo();
-    // Do not let the next stream open while the old native decoder, demuxer
-    // cache and Flutter texture are still alive. Overlapping libmpv instances
-    // made every channel switch retain another large block of native memory.
+    _player = null;
+    _videoController = null;
+    _engineReleased = true;
     try {
       await old.dispose();
     } catch (_) {}
+    if (_disposed) return;
+    final engine = _createPlaybackEngine();
+    player = engine.$1;
+    videoController = engine.$2;
+    _engineReleased = false;
+    _engineDirty = false;
+    _engineGeneration++;
+    _listenPlaybackInfo();
   }
 
   (Player, VideoController) _createPlaybackEngine() {
@@ -599,6 +641,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _pollBitrate() async {
     if (_bitratePollInFlight ||
         _disposed ||
+        _engineReleased ||
         nowPlaying == null ||
         _failureLabel != null) {
       return;
@@ -617,7 +660,7 @@ class PlaybackController extends ChangeNotifier {
           await (platform as dynamic).getProperty('hwdec-current') as String?;
       if (_disposed ||
           generation != _engineGeneration ||
-          !identical(polledPlayer, player)) {
+          !identical(polledPlayer, _player)) {
         return;
       }
       final parsedBitrate = bitrateValue == null
@@ -912,6 +955,9 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> play(Channel channel) async {
     final request = ++playbackRequest;
+    // Returning home fully releases libmpv. Recreate it only when the user
+    // actually starts another channel, not merely when a source page opens.
+    _restoreEngine();
     // A dirty engine has already painted a frame that its texture would
     // otherwise retain across a channel switch. Rebuild the engine so the stale
     // frame is truly released; a pristine engine (first play, or one freshly
@@ -1253,7 +1299,7 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Future<void> stopPlayback() async {
+  Future<void> stopPlayback({bool releaseEngine = false}) async {
     playbackRequest++;
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
@@ -1280,13 +1326,14 @@ class PlaybackController extends ChangeNotifier {
       _mmtTlvServer.stop(),
     ]);
     streamUrlController.clear();
-    // Tear the engine down entirely rather than just pausing it. media_kit's
-    // player.stop() leaves the last decoded frame in the Flutter texture, so a
-    // later play() (e.g. after switching playlists) would flash that stale
-    // frame. Disposing the Player frees its render context and unregisters the
-    // texture; a fresh blank engine takes its place. Only bother when the
-    // current engine has actually shown something.
-    if (_engineDirty) {
+    // Returning home releases libmpv without replacing it; the transport Stop
+    // button keeps a blank engine because PlayerPage remains visible there.
+    if (releaseEngine) {
+      await _releaseEngine();
+    } else if (_engineReleased) {
+      // Nothing native remains to stop. This occurs when callers defensively
+      // stop playback before opening a source from the home page.
+    } else if (_engineDirty) {
       await _swapEngine();
     } else {
       try {

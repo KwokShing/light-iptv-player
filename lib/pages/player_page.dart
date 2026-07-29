@@ -12,6 +12,7 @@ import '../models/playlist.dart';
 import '../services/paste_to_play.dart';
 import '../theme.dart';
 import '../widgets/channel_list.dart';
+import '../widgets/common.dart';
 import '../widgets/debug_log_sidebar.dart';
 import '../widgets/epg_schedule_panel.dart';
 import '../widgets/playback_controls.dart';
@@ -187,19 +188,20 @@ class _PlayerPageState extends State<PlayerPage> {
                                         fit: StackFit.expand,
                                         children: [
                                           const ColoredBox(color: Colors.black),
-                                          Video(
-                                            key: ValueKey(
-                                              playback.engineGeneration,
+                                          if (playback.hasPlaybackEngine)
+                                            Video(
+                                              key: ValueKey(
+                                                playback.engineGeneration,
+                                              ),
+                                              controller:
+                                                  playback.videoController,
+                                              fit: BoxFit.contain,
+                                              controls: NoVideoControls,
+                                              subtitleViewConfiguration:
+                                                  const SubtitleViewConfiguration(
+                                                    visible: false,
+                                                  ),
                                             ),
-                                            controller:
-                                                playback.videoController,
-                                            fit: BoxFit.contain,
-                                            controls: NoVideoControls,
-                                            subtitleViewConfiguration:
-                                                const SubtitleViewConfiguration(
-                                                  visible: false,
-                                                ),
-                                          ),
                                           // Hold the last decoded frame over
                                           // the video while reconnecting so a
                                           // segmented stream doesn't flash
@@ -411,21 +413,32 @@ class _PlayerPageState extends State<PlayerPage> {
     // the save button both stop treating it as temporary.
     ui.temporarySourceId = null;
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Saved to library')),
-    );
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('Saved to library')));
   }
 
   Future<void> _showSourcesPage(BuildContext context) async {
     final ui = context.read<UiController>();
     final playback = context.read<PlaybackController>();
     final sources = context.read<SourcesController>();
-    await playback.stopPlayback();
+    final epg = context.read<EpgController>();
+    final epgUrl = widget.source.epgUrl;
+    await playback.stopPlayback(releaseEngine: true);
     ui.showSourcesPage();
     playback.resetFullscreenState();
     // Discard the in-memory paste source so it never lingers in the saved
     // sources list once we're back home.
     ui.temporarySourceId = null;
     sources.discardTemporary();
+    epg.releaseGuide(epgUrl);
+    // Wait until PlayerPage and its Image widgets are unmounted, then release
+    // decoded channel logos. They are cheap to reload and otherwise account for
+    // up to the app-wide 128 MiB image-cache limit after returning home.
+    await WidgetsBinding.instance.endOfFrame;
+    ChannelLogo.clearMemoryCache();
+    PaintingBinding.instance.imageCache
+      ..clear()
+      ..clearLiveImages();
   }
 }

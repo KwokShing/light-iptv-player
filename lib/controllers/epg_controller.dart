@@ -41,7 +41,8 @@ class EpgController extends ChangeNotifier {
   final Map<String, EpgGuide> _guides = {};
   final Map<String, DateTime> _fetchedAt = {};
   final Map<String, String> _errors = {};
-  final Set<String> _loading = {};
+  final Map<String, int> _loading = {};
+  final Map<String, int> _loadGenerations = {};
 
   // Bumped whenever guide data changes so time-based widgets can also key off
   // it if needed. Mostly we just rely on notifyListeners().
@@ -51,9 +52,9 @@ class EpgController extends ChangeNotifier {
   bool _restored = false;
 
   /// The guide URLs currently being fetched/parsed (for spinners).
-  Set<String> get loadingUrls => Set.unmodifiable(_loading);
+  Set<String> get loadingUrls => Set.unmodifiable(_loading.keys);
 
-  bool isLoading(String? url) => url != null && _loading.contains(url);
+  bool isLoading(String? url) => url != null && _loading.containsKey(url);
 
   bool hasGuide(String? url) => url != null && _guides.containsKey(url);
 
@@ -65,7 +66,7 @@ class EpgController extends ChangeNotifier {
   /// The coarse status of [url]'s guide, for user-facing diagnostics.
   EpgStatus statusFor(String? url) {
     if (url == null || url.trim().isEmpty) return EpgStatus.noUrl;
-    if (_loading.contains(url)) return EpgStatus.loading;
+    if (_loading.containsKey(url)) return EpgStatus.loading;
     if (_guides.containsKey(url)) return EpgStatus.ready;
     if (_errors.containsKey(url)) return EpgStatus.error;
     return EpgStatus.loading;
@@ -111,15 +112,17 @@ class EpgController extends ChangeNotifier {
   /// best-effort) but logged.
   Future<void> ensureGuide(String? url, {bool force = false}) async {
     if (url == null || url.trim().isEmpty) return;
-    if (_loading.contains(url)) return;
+    if (_loading.containsKey(url)) return;
     if (!force && _guides.containsKey(url)) return;
 
+    final generation = (_loadGenerations[url] ?? 0) + 1;
+    _loadGenerations[url] = generation;
     final fetchedAt = _fetchedAt[url];
     final fresh =
         fetchedAt != null &&
         DateTime.now().toUtc().difference(fetchedAt) < epgRefreshInterval;
 
-    _loading.add(url);
+    _loading[url] = generation;
     notifyListeners();
     try {
       // Try the on-disk cache first when it's still fresh and not forced.
@@ -127,6 +130,7 @@ class EpgController extends ChangeNotifier {
         final cached = await _readCache(url);
         if (cached != null) {
           final guide = await compute(parseXmltv, cached);
+          if (_loadGenerations[url] != generation) return;
           _guides[url] = guide;
           _errors.remove(url);
           _bump();
@@ -136,6 +140,7 @@ class EpgController extends ChangeNotifier {
 
       final bytes = await _download(url);
       final guide = await compute(parseXmltv, bytes);
+      if (_loadGenerations[url] != generation) return;
       _guides[url] = guide;
       _errors.remove(url);
       _fetchedAt[url] = DateTime.now().toUtc();
@@ -148,6 +153,7 @@ class EpgController extends ChangeNotifier {
       );
       _bump();
     } catch (error) {
+      if (_loadGenerations[url] != generation) return;
       _errors[url] = error.toString();
       DebugLogService.instance.add(
         'Guide load failed ($url): $error',
@@ -156,9 +162,22 @@ class EpgController extends ChangeNotifier {
       );
       debugPrint('EPG load failed for $url: $error');
     } finally {
-      _loading.remove(url);
+      if (_loading[url] == generation) _loading.remove(url);
       notifyListeners();
     }
+  }
+
+  /// Drops a parsed guide when its player page is closed. The raw XMLTV cache
+  /// remains on disk, so reopening the source can restore it without another
+  /// network download. Bumping the generation also prevents an in-flight parse
+  /// from repopulating memory after the user has returned home.
+  void releaseGuide(String? url) {
+    if (url == null || url.trim().isEmpty) return;
+    _loadGenerations[url] = (_loadGenerations[url] ?? 0) + 1;
+    _loading.remove(url);
+    final hadGuide = _guides.remove(url) != null;
+    final hadError = _errors.remove(url) != null;
+    if (hadGuide || hadError) _bump();
   }
 
   void _bump() {

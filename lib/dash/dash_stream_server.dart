@@ -51,7 +51,7 @@ class DashStreamServer {
   // requests reuse keep-alive connections instead of re-doing TCP+TLS each
   // time. Per the perf logs, per-segment download latency — not decryption —
   // was the bottleneck, and that is dominated by connection setup on a CDN.
-  final http.Client _client = _buildClient();
+  http.Client? _client;
 
   static http.Client _buildClient() {
     final io = HttpClient()
@@ -94,6 +94,7 @@ class DashStreamServer {
   /// Returns the local URL to hand to mpv.
   Future<String> start(String mpdUrl, Map<String, String> keys) async {
     await stop();
+    _client = _buildClient();
     _mpdUrl = mpdUrl;
     _resolvedMpdUrl = '';
     _tfdtOrigins.clear();
@@ -112,6 +113,9 @@ class DashStreamServer {
 
   Future<void> stop() async {
     _sessionSeq++;
+    final client = _client;
+    _client = null;
+    client?.close();
     final server = _server;
     _server = null;
     if (server != null) {
@@ -119,11 +123,14 @@ class DashStreamServer {
         await server.close(force: true);
       } catch (_) {}
     }
+    _mpdUrl = '';
+    _resolvedMpdUrl = '';
+    _keys = {};
+    _tfdtOrigins.clear();
   }
 
   void dispose() {
-    stop();
-    _client.close();
+    unawaited(stop());
   }
 
   Future<void> _handle(HttpRequest req) async {
@@ -651,8 +658,10 @@ class DashStreamServer {
   // instead by prefetching several *whole* segments concurrently (see the
   // pipeline in _serveStream, sized by _prefetchDepth).
   Future<Uint8List?> _get(String url) async {
+    final client = _client;
+    if (client == null) return null;
     try {
-      final res = await _client.get(Uri.parse(url), headers: _originHeaders);
+      final res = await client.get(Uri.parse(url), headers: _originHeaders);
       if (res.statusCode < 200 || res.statusCode >= 300) {
         debugPrint('dash: HTTP ${res.statusCode} for $url');
         return null;
@@ -704,12 +713,14 @@ class DashStreamServer {
   static const int _manifestAttempts = 4;
 
   Future<(String, Uint8List)> _fetchFollowingRedirects(String url) async {
+    final client = _client;
+    if (client == null) throw StateError('DASH session has stopped');
     var current = Uri.parse(url);
     for (var i = 0; i < 10; i++) {
       final request = http.Request('GET', current)
         ..followRedirects = false
         ..headers.addAll(_originHeaders);
-      final streamed = await _client.send(request);
+      final streamed = await client.send(request);
       final loc = streamed.headers['location'];
       if (streamed.statusCode >= 300 &&
           streamed.statusCode < 400 &&

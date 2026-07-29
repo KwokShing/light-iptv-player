@@ -58,6 +58,7 @@ bool looksLikeMmtTlv(List<int> bytes) {
 class MmtTlvStreamServer {
   HttpServer? _server;
   StreamSubscription<HttpRequest>? _requests;
+  StreamSubscription<String>? _stderrSubscription;
   Process? _process;
   http.Client? _originClient;
   String? _source;
@@ -129,7 +130,7 @@ class MmtTlvStreamServer {
         return;
       }
       _process = process;
-      process.stderr
+      _stderrSubscription = process.stderr
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
@@ -200,13 +201,21 @@ class MmtTlvStreamServer {
     _originClient?.close();
     _originClient = null;
     final process = _process;
+    final stderrSubscription = _stderrSubscription;
     _process = null;
+    _stderrSubscription = null;
     if (process != null) {
       try {
         await process.stdin.close();
       } catch (_) {}
       process.kill();
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {}
     }
+    try {
+      await stderrSubscription?.cancel();
+    } catch (_) {}
   }
 
   Future<void> stop() async {

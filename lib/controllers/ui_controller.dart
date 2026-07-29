@@ -81,8 +81,16 @@ class UiController extends ChangeNotifier {
     openSource(source);
   }
 
+  /// Closes the player and returns to the source library. Both source
+  /// references are cleared so the root widget unmounts PlayerPage instead of
+  /// keeping its Video texture and channel list hidden behind SourcesPage.
   void showSourcesPage() {
     activeSource = null;
+    playerSource = null;
+    activeGroup = allChannels;
+    search = '';
+    _visibleChannelsCache = const [];
+    _visibleChannelsKey = null;
     notifyListeners();
   }
 

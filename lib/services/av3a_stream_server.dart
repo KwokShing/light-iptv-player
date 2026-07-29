@@ -110,6 +110,7 @@ bool _pmtContainsAv3a(List<int> section, int start) {
 class Av3aStreamServer {
   HttpServer? _server;
   StreamSubscription<HttpRequest>? _requests;
+  StreamSubscription<String>? _stderrSubscription;
   Process? _process;
   String? _source;
   String? _proxyUrl;
@@ -245,7 +246,7 @@ class Av3aStreamServer {
         return;
       }
       _process = process;
-      process.stderr
+      _stderrSubscription = process.stderr
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
@@ -287,8 +288,18 @@ class Av3aStreamServer {
 
   Future<void> _stopProcess() async {
     final process = _process;
+    final stderrSubscription = _stderrSubscription;
     _process = null;
-    if (process != null) process.kill();
+    _stderrSubscription = null;
+    if (process != null) {
+      process.kill();
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+    try {
+      await stderrSubscription?.cancel();
+    } catch (_) {}
   }
 
   Future<void> stop() async {
