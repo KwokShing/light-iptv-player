@@ -28,6 +28,12 @@ class SourcesController extends ChangeNotifier {
   bool _loaded = false;
   bool get loaded => _loaded;
 
+  // Id of an in-memory-only source (the Ctrl+V "paste and play" throwaway). It
+  // participates in the live [sources] list so the UI can show/play it, but is
+  // deliberately excluded from persistence so it never survives an app restart
+  // or leaks into the saved list if the user leaves without pressing home.
+  String? _ephemeralId;
+
   final _messages = StreamController<String>.broadcast();
   Stream<String> get messages => _messages.stream;
 
@@ -66,7 +72,12 @@ class SourcesController extends ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(
       sourcesStorageKey,
-      jsonEncode(_sources.map((source) => source.toJson()).toList()),
+      jsonEncode(
+        _sources
+            .where((source) => source.id != _ephemeralId)
+            .map((source) => source.toJson())
+            .toList(),
+      ),
     );
   }
 
@@ -111,6 +122,52 @@ class SourcesController extends ChangeNotifier {
   Future<void> upsert(PlaylistSource source) async {
     _sources = [source, ..._sources];
     notifyListeners();
+    await _save();
+  }
+
+  // Insert the in-memory-only paste source. It shows up in [sources] and can be
+  // played immediately, but is not written to disk (see [_save]). Any previous
+  // ephemeral source is dropped first so only one is ever live.
+  void upsertTemporary(PlaylistSource source) {
+    _sources = [
+      source,
+      ..._sources.where((item) => item.id != _ephemeralId),
+    ];
+    _ephemeralId = source.id;
+    notifyListeners();
+  }
+
+  // Swap the live ephemeral source in place (Ctrl+V while viewing it). Stays
+  // in memory only.
+  void replaceTemporary(PlaylistSource source) {
+    _ephemeralId = source.id;
+    _sources = _sources
+        .map((item) => item.id == source.id ? source : item)
+        .toList();
+    notifyListeners();
+    _replaced.add(source);
+  }
+
+  // Drop the live ephemeral source without touching disk. No-op if there is
+  // none (e.g. the user already saved it via some other flow).
+  void discardTemporary() {
+    final id = _ephemeralId;
+    if (id == null) return;
+    _ephemeralId = null;
+    if (_sources.every((item) => item.id != id)) return;
+    _sources = _sources.where((item) => item.id != id).toList();
+    notifyListeners();
+    _removed.add(id);
+  }
+
+  // Promote the live ephemeral paste source into a permanent, persisted source
+  // so it survives leaving the player and app restarts. No-op if there is none.
+  Future<void> keepTemporary() async {
+    if (_ephemeralId == null ||
+        _sources.every((item) => item.id != _ephemeralId)) {
+      return;
+    }
+    _ephemeralId = null;
     await _save();
   }
 

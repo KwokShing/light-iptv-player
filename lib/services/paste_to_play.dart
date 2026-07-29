@@ -65,7 +65,7 @@ Future<void> pasteAndPlay(BuildContext context) async {
   final sources = context.read<SourcesController>();
   final ui = context.read<UiController>();
   final playback = context.read<PlaybackController>();
-  await sources.upsert(source);
+  sources.upsertTemporary(source);
   await playback.stopPlayback();
   ui.openTemporarySource(source);
   await playback.play(channel);
@@ -88,6 +88,6 @@ Future<void> pasteAndReplace(BuildContext context, PlaylistSource temp) async {
 
   final sources = context.read<SourcesController>();
   final playback = context.read<PlaybackController>();
-  await sources.replace(updated);
+  sources.replaceTemporary(updated);
   await playback.play(channel);
 }

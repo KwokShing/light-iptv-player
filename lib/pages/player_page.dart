@@ -110,10 +110,17 @@ class _PlayerPageState extends State<PlayerPage> {
                       onChanged: ui.setSearch,
                       hint: 'Search channels',
                     ),
-                    trailing: const [
-                      UserAgentButton(),
-                      SizedBox(width: 10),
-                      ProxyButton(),
+                    trailing: [
+                      if (isTemporary)
+                        TopBarIconButton(
+                          icon: Icons.playlist_add_rounded,
+                          tooltip: 'Save to library',
+                          onPressed: () => _keepTemporary(context),
+                        ),
+                      if (isTemporary) const SizedBox(width: 10),
+                      const UserAgentButton(),
+                      const SizedBox(width: 10),
+                      const ProxyButton(),
                     ],
                   ),
                 Expanded(
@@ -396,20 +403,29 @@ class _PlayerPageState extends State<PlayerPage> {
     );
   }
 
+  Future<void> _keepTemporary(BuildContext context) async {
+    final ui = context.read<UiController>();
+    final sources = context.read<SourcesController>();
+    await sources.keepTemporary();
+    // No longer a throwaway: clear the flag so the Ctrl+V-in-place shortcut and
+    // the save button both stop treating it as temporary.
+    ui.temporarySourceId = null;
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Saved to library')),
+    );
+  }
+
   Future<void> _showSourcesPage(BuildContext context) async {
     final ui = context.read<UiController>();
     final playback = context.read<PlaybackController>();
     final sources = context.read<SourcesController>();
-    final temporaryId = ui.temporarySourceId;
     await playback.stopPlayback();
     ui.showSourcesPage();
     playback.resetFullscreenState();
-    // Discard the throwaway source created by a Ctrl+V paste so it doesn't
-    // linger in the saved sources list once we're back home.
-    if (temporaryId != null) {
-      ui.temporarySourceId = null;
-      final matches = sources.sources.where((item) => item.id == temporaryId);
-      if (matches.isNotEmpty) await sources.delete(matches.first);
-    }
+    // Discard the in-memory paste source so it never lingers in the saved
+    // sources list once we're back home.
+    ui.temporarySourceId = null;
+    sources.discardTemporary();
   }
 }
