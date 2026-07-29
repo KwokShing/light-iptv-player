@@ -152,7 +152,7 @@ class DashStreamServer {
   // support, each segment is one single-connection download, so this depth is
   // the only lever for aggregating bandwidth — several segments in flight at
   // once. Start moderate; tune against the CDN's concurrency tolerance.
-  static const int _prefetchDepth = 6;
+  static const int _prefetchDepth = 3;
 
   // How far behind the live edge to start, in segments. Our multi-segment
   // parallel download is much faster than real-time, so it quickly catches up
@@ -162,12 +162,10 @@ class DashStreamServer {
   // stall-free playback.
   static const int _liveEdgeBackoff = 20;
 
-  // Max bytes of muxed fragments buffered between the producer (download/decrypt
-  // /mux) and the consumer (flush to mpv). The producer keeps working ahead up
-  // to this cap even while mpv drains slowly, so "fetch the next segment before
-  // the current finishes playing" actually happens. Large enough to hold many
-  // seconds of the low-bitrate rendition and ride out slow-download outliers.
-  static const int _maxBufferedBytes = 128 * 1024 * 1024;
+  // Keep this bounded: each queued fragment has also existed as downloaded,
+  // decrypted and muxed byte arrays, so a 128 MiB queue can produce a much
+  // larger transient working set.
+  static const int _maxBufferedBytes = 32 * 1024 * 1024;
 
   Future<void> _serveStream(HttpRequest req, int session) async {
     final initial = await _fetchManifest();
@@ -388,24 +386,33 @@ class DashStreamServer {
     // Consumer: drain the buffer to mpv, flushing (mpv's own backpressure only
     // gates this task, not the producer above).
     Future<void> consume() async {
-      while (session == _sessionSeq) {
-        if (buffered.isEmpty) {
-          if (producerDone) break;
-          dataReady ??= Completer<void>();
-          await dataReady!.future;
-          continue;
+      try {
+        while (session == _sessionSeq) {
+          if (buffered.isEmpty) {
+            if (producerDone) break;
+            dataReady ??= Completer<void>();
+            await dataReady!.future;
+            continue;
+          }
+          final chunk = buffered.removeAt(0);
+          bufferedBytes -= chunk.length;
+          signalSpace();
+          try {
+            req.response.add(chunk);
+            await req.response.flush();
+          } on SocketException {
+            return; // mpv closed the connection.
+          } catch (_) {
+            return;
+          }
         }
-        final chunk = buffered.removeAt(0);
-        bufferedBytes -= chunk.length;
+      } finally {
+        // If mpv disconnects while the producer is blocked on a full queue,
+        // invalidate this session and wake it. Without this, the producer's
+        // Future and its entire fragment buffer remain reachable forever.
+        if (session == _sessionSeq) _sessionSeq++;
         signalSpace();
-        try {
-          req.response.add(chunk);
-          await req.response.flush();
-        } on SocketException {
-          return; // mpv closed the connection.
-        } catch (_) {
-          return;
-        }
+        signalData();
       }
     }
 

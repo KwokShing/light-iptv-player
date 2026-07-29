@@ -154,6 +154,7 @@ class PlaybackController extends ChangeNotifier {
   double? containerFps;
   String? hwdecCurrent;
   bool _interpolationConfigured = false;
+  bool _bitratePollInFlight = false;
   // Per-channel deinterlace toggle. Starts OFF for every stream and is reset
   // to OFF on each channel switch (see play()); the user turns it on manually
   // when a given channel shows combing.
@@ -190,7 +191,7 @@ class PlaybackController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
-    _cancelStreamSubscriptions();
+    unawaited(_cancelStreamSubscriptions());
     _bitrateTimer?.cancel();
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
@@ -201,21 +202,41 @@ class PlaybackController extends ChangeNotifier {
     _dashServer.dispose();
     _av3aServer.dispose();
     _mmtTlvServer.dispose();
-    player.dispose();
+    unawaited(player.dispose());
     _messages.close();
     super.dispose();
   }
 
-  void _cancelStreamSubscriptions() {
-    _videoParamsSubscription?.cancel();
-    _trackSubscription?.cancel();
-    _completedSubscription?.cancel();
-    _playingSubscription?.cancel();
-    _bufferingSubscription?.cancel();
-    _positionSubscription?.cancel();
-    _durationSubscription?.cancel();
-    _errorSubscription?.cancel();
-    _logSubscription?.cancel();
+  Future<void> _cancelStreamSubscriptions() async {
+    final subscriptions = <StreamSubscription<dynamic>?>[
+      _videoParamsSubscription,
+      _trackSubscription,
+      _completedSubscription,
+      _playingSubscription,
+      _bufferingSubscription,
+      _positionSubscription,
+      _durationSubscription,
+      _errorSubscription,
+      _logSubscription,
+    ];
+    _videoParamsSubscription = null;
+    _trackSubscription = null;
+    _completedSubscription = null;
+    _playingSubscription = null;
+    _bufferingSubscription = null;
+    _positionSubscription = null;
+    _durationSubscription = null;
+    _errorSubscription = null;
+    _logSubscription = null;
+    await Future.wait(
+      subscriptions.whereType<StreamSubscription<dynamic>>().map((
+        subscription,
+      ) async {
+        try {
+          await subscription.cancel();
+        } catch (_) {}
+      }),
+    );
   }
 
   /// Tears down the current mpv engine and builds a fresh one. Disposing the
@@ -226,7 +247,7 @@ class PlaybackController extends ChangeNotifier {
   /// previous channel's final frame. The player page rebinds via
   /// [engineGeneration].
   Future<void> _recreateEngine() async {
-    _swapEngine();
+    await _swapEngine();
     notifyListeners();
   }
 
@@ -235,8 +256,8 @@ class PlaybackController extends ChangeNotifier {
   /// last decoded frame the texture retains by design), then rebinds the UI via
   /// [engineGeneration]. Callers are responsible for calling notifyListeners()
   /// at an appropriate point.
-  void _swapEngine() {
-    _cancelStreamSubscriptions();
+  Future<void> _swapEngine() async {
+    await _cancelStreamSubscriptions();
     final old = player;
     final engine = _createPlaybackEngine();
     player = engine.$1;
@@ -244,9 +265,12 @@ class PlaybackController extends ChangeNotifier {
     _engineDirty = false;
     _engineGeneration++;
     _listenPlaybackInfo();
-    // Dispose the old engine after the swap so the UI can bind the new texture
-    // first; the black gap between the two is what replaces the stale frame.
-    unawaited(old.dispose().catchError((_) {}));
+    // Do not let the next stream open while the old native decoder, demuxer
+    // cache and Flutter texture are still alive. Overlapping libmpv instances
+    // made every channel switch retain another large block of native memory.
+    try {
+      await old.dispose();
+    } catch (_) {}
   }
 
   (Player, VideoController) _createPlaybackEngine() {
@@ -261,11 +285,10 @@ class PlaybackController extends ChangeNotifier {
         // that line reaches player.stream.log; the extra chatter is filtered in
         // the log listener before it reaches the debug UI.
         logLevel: MPVLogLevel.info,
-        // Forward read-ahead cache. media_kit turns this into mpv's
-        // `demuxer-max-bytes`. Sized generously here (overridden per-stream in
-        // _applyPlaybackOptions) so DASH playback can buffer many seconds and
-        // ride out slow segment downloads on rate-limited CDNs.
-        bufferSize: 128 * 1024 * 1024,
+        // Bound native read-ahead memory. A large value is especially costly
+        // while switching channels because decoder and demuxer allocations may
+        // coexist briefly until libmpv finishes releasing the old stream.
+        bufferSize: 32 * 1024 * 1024,
       ),
     );
     final nextVideoController = VideoController(
@@ -410,17 +433,18 @@ class PlaybackController extends ChangeNotifier {
     // lines are not treated as load failures — only genuine "Player error"
     // events (player.stream.error, handled above) are.
     _logSubscription = player.stream.log.listen((log) {
-      debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
+      final isRoutineLog =
+          log.level == 'info' || log.level == 'v' || log.level == 'debug';
       final level = switch (log.level) {
         'error' || 'fatal' => DebugLogLevel.error,
         'warn' => DebugLogLevel.warn,
         _ => DebugLogLevel.info,
       };
-      // mpv now runs at `info` so the definitive AV3A codec-parameter line is
-      // delivered (see _createPlaybackEngine), but the debug UI should still
-      // only surface real problems. Keep warn/error/fatal; drop routine info
-      // chatter so the log panel is not flooded.
-      if (log.level != 'info' && log.level != 'v' && log.level != 'debug') {
+      // mpv runs at info so AV3A can be detected below, but forwarding its
+      // high-frequency routine output to debugPrint builds a large throttled
+      // console queue during long playback. Only retain actionable messages.
+      if (!isRoutineLog) {
+        debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
         DebugLogService.instance.add(
           '${log.prefix}: ${log.text}',
           level: level,
@@ -573,8 +597,17 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> _pollBitrate() async {
-    final platform = player.platform;
-    if (platform == null || nowPlaying == null || _failureLabel != null) return;
+    if (_bitratePollInFlight ||
+        _disposed ||
+        nowPlaying == null ||
+        _failureLabel != null) {
+      return;
+    }
+    final polledPlayer = player;
+    final generation = _engineGeneration;
+    final platform = polledPlayer.platform;
+    if (platform == null) return;
+    _bitratePollInFlight = true;
     try {
       final bitrateValue =
           await (platform as dynamic).getProperty('video-bitrate') as String?;
@@ -582,7 +615,11 @@ class PlaybackController extends ChangeNotifier {
           await (platform as dynamic).getProperty('container-fps') as String?;
       final hwdecValue =
           await (platform as dynamic).getProperty('hwdec-current') as String?;
-      if (_disposed) return;
+      if (_disposed ||
+          generation != _engineGeneration ||
+          !identical(polledPlayer, player)) {
+        return;
+      }
       final parsedBitrate = bitrateValue == null
           ? null
           : int.tryParse(bitrateValue);
@@ -597,7 +634,10 @@ class PlaybackController extends ChangeNotifier {
         _interpolationConfigured = true;
         await _applyInterpolationForFps(parsedFps);
       }
-    } catch (_) {}
+    } catch (_) {
+    } finally {
+      _bitratePollInFlight = false;
+    }
   }
 
   // Sniffs a stream before it is handed to mpv, fetching a small prefix with a
@@ -712,7 +752,8 @@ class PlaybackController extends ChangeNotifier {
         // (it never reaches player.stream.log). Resolve the manifest down to
         // its first media segment and scan THAT for the AV3A PMT / fourcc so we
         // pick the decoder bridge before mpv ever opens the stream.
-        final segmentAv3a = isAv3a || await _hlsSegmentIsAv3a(head, uri, client);
+        final segmentAv3a =
+            isAv3a || await _hlsSegmentIsAv3a(head, uri, client);
         return (
           nativeSafe: true,
           isHls: true,
@@ -753,11 +794,7 @@ class PlaybackController extends ChangeNotifier {
       var baseUri = manifestUri;
       // If this is a master playlist (variant streams, no segments), descend
       // into the first variant's media playlist first.
-      final firstVariant = _firstHlsUri(
-        playlist,
-        baseUri,
-        wantVariant: true,
-      );
+      final firstVariant = _firstHlsUri(playlist, baseUri, wantVariant: true);
       if (firstVariant != null) {
         final variantBody = await _fetchText(firstVariant, client);
         if (variantBody != null) {
@@ -1237,9 +1274,11 @@ class PlaybackController extends ChangeNotifier {
     _tlsVerifyDisabled = false;
     _tlsFallbackStarting = false;
     _clearFreezeFrame();
-    unawaited(_dashServer.stop());
-    unawaited(_av3aServer.stop());
-    unawaited(_mmtTlvServer.stop());
+    await Future.wait([
+      _dashServer.stop(),
+      _av3aServer.stop(),
+      _mmtTlvServer.stop(),
+    ]);
     streamUrlController.clear();
     // Tear the engine down entirely rather than just pausing it. media_kit's
     // player.stop() leaves the last decoded frame in the Flutter texture, so a
@@ -1248,7 +1287,7 @@ class PlaybackController extends ChangeNotifier {
     // texture; a fresh blank engine takes its place. Only bother when the
     // current engine has actually shown something.
     if (_engineDirty) {
-      _swapEngine();
+      await _swapEngine();
     } else {
       try {
         await player.stop();
@@ -1443,15 +1482,10 @@ class PlaybackController extends ChangeNotifier {
       // Keep the last decoded frame on EOF so a fast `loadfile replace` at a
       // segment boundary does not flash black while the next connection opens.
       'keep-open': 'yes',
-      // Let mpv actually use more of media_kit's forward buffer. This does not
-      // stitch independent segments together (so no rewind risk), but it lets
-      // mpv hold many seconds of demuxed data so a slow segment download (the
-      // ~8s outliers on this rate-limited CDN) doesn't drain the buffer and
-      // stall playback.
-      'demuxer-readahead-secs': '60',
-      // Also cap the total forward demuxer cache generously so readahead-secs
-      // isn't the limiting factor for the low-bitrate stream.
-      'demuxer-max-bytes': (128 * 1024 * 1024).toString(),
+      // Keep enough read-ahead to absorb normal CDN jitter without retaining
+      // a minute of demuxed packets for every live stream.
+      'demuxer-readahead-secs': '20',
+      'demuxer-max-bytes': (32 * 1024 * 1024).toString(),
       // We buffer entirely in memory (the demuxer cache above plus our own
       // producer queue), so stop mpv trying to spill the cache to a disk file
       // — that attempt just fails with "lavf: Failed to create file cache".
