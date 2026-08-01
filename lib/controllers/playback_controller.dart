@@ -348,6 +348,10 @@ class PlaybackController extends ChangeNotifier {
         bufferSize: 32 * 1024 * 1024,
       ),
     );
+    // Must start before the VideoController below is constructed: it races
+    // against VideoOutputManager.Create (which creates the render context),
+    // and mpv ignores runtime changes to gpu-hwdec-interop.
+    unawaited(_disableRenderHwdecInterop(nextPlayer));
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
@@ -365,6 +369,39 @@ class PlaybackController extends ChangeNotifier {
       ),
     );
     return (nextPlayer, nextVideoController);
+  }
+
+  /// Blocks hwdec-interop loading in the libmpv render context. The libmpv
+  /// render API (media_kit's video path) has no on-demand interop loading, so
+  /// the default `gpu-hwdec-interop=auto` behaves like `all`: every interop is
+  /// loaded eagerly when the render context is created. The `dxva2-egl`
+  /// interop then fails to init on ANGLE's D3D11 backend and logs
+  /// "[mpv:error] libmpv_render/dxva2-egl: Failed to create EGL surface" on
+  /// every engine (re)creation, i.e. every channel switch. Since `hwdec` is
+  /// pinned to `auto-copy` (decode + readback, see _createPlaybackEngine), no
+  /// GPU interop is ever used, so loading none is safe and also skips the
+  /// pointless probing work.
+  ///
+  /// Timing is critical: mpv reads this option only once, when the render
+  /// context is created inside VideoOutputManager.Create. A plain
+  /// `setProperty` would `await waitForVideoControllerInitializationIfAttached`
+  /// — which completes only after that render context already exists — so this
+  /// waits for the raw mpv handle instead and writes the property directly.
+  /// The VideoController's own create flow waits for a post-frame callback and
+  /// a decoder query first, so this always lands in time.
+  Future<void> _disableRenderHwdecInterop(Player target) async {
+    try {
+      await target.handle;
+      final platform = target.platform;
+      if (platform == null) return;
+      await (platform as dynamic).setProperty(
+        'gpu-hwdec-interop',
+        'no',
+        waitForInitialization: false,
+      );
+    } catch (e) {
+      debugPrint('Failed to set gpu-hwdec-interop: $e');
+    }
   }
 
   bool _refreshSubtitleTracks(Iterable<SubtitleTrack> tracks) {
