@@ -443,20 +443,12 @@ class SourceTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(10),
+      color: AppColors.surface,
       child: InkWell(
         onTap: onOpen,
-        borderRadius: BorderRadius.circular(10),
         hoverColor: AppColors.surfaceMuted,
-        child: Container(
+        child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          decoration: BoxDecoration(
-            color: AppColors.surface,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: AppColors.border, width: 1),
-            boxShadow: cardShadow(),
-          ),
           child: Row(
             children: [
               const AppLogo(size: 38),
@@ -502,10 +494,6 @@ class SourceTile extends StatelessWidget {
                             fontSize: 12,
                           ),
                         ),
-                        if (source.cached) ...[
-                          const SizedBox(width: 8),
-                          const Tag(label: 'Cached', green: true),
-                        ],
                       ],
                     ),
                   ],

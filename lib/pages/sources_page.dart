@@ -471,7 +471,11 @@ class _SourcesPageState extends State<SourcesPage> {
                             onDelete: () => _deleteSource(context, source),
                           );
                         },
-                        separatorBuilder: (_, _) => const SizedBox(height: 8),
+                        separatorBuilder: (_, _) => const Divider(
+                          height: 1,
+                          thickness: 1,
+                          color: AppColors.border,
+                        ),
                         itemCount: sources.sources.length,
                       ),
               ),
