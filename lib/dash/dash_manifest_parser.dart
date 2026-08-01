@@ -62,10 +62,11 @@ class DashManifestParser {
   }
 
   // Some CDNs prepend a UTF-8 BOM or stray whitespace/newlines before the XML
-  // declaration, and a few append trailing bytes after </MPD>. Either makes
-  // `XmlDocument.parse` reject the document ("Expected a single root element").
-  // Strip the BOM and, if a root <MPD> element is present, slice out exactly
-  // that element so extraneous surrounding content can't break parsing.
+  // declaration, and a few append trailing bytes (or even another complete
+  // response) after </MPD>. Either makes `XmlDocument.parse` reject the
+  // document ("Expected a single root element"). Strip the BOM and slice from
+  // the first <MPD> through its first closing tag, so a concatenated second MPD
+  // cannot become another document root.
   static String _sanitize(String xmlText) {
     var text = xmlText;
     if (text.isNotEmpty && text.codeUnitAt(0) == 0xFEFF) {
@@ -75,7 +76,7 @@ class DashManifestParser {
 
     final start = text.indexOf('<MPD');
     if (start < 0) return text;
-    final endTag = text.lastIndexOf('</MPD>');
+    final endTag = text.indexOf('</MPD>', start);
     if (endTag >= start) {
       return text.substring(start, endTag + '</MPD>'.length);
     }

@@ -45,6 +45,16 @@ class _SelectedTrack {
   TrackCrypto? crypto; // discovered from the init segment
 }
 
+class _ManifestFetchException implements Exception {
+  const _ManifestFetchException(this.message, {this.retryAfter});
+
+  final String message;
+  final Duration? retryAfter;
+
+  @override
+  String toString() => message;
+}
+
 class DashStreamServer {
   HttpServer? _server;
   // A tuned HttpClient (not package:http's default) so the many small segment
@@ -681,10 +691,9 @@ class DashStreamServer {
   // origin to obtain newer segments — effectively reloading the stream the way
   // a channel switch would.
   //
-  // The `…php?id=` origin intermittently returns a non-MPD body (rate-limit /
-  // error page), which parses to "Expected a single root element". Rather than
-  // failing the whole session on one bad response, retry a few times; a later
-  // attempt almost always succeeds.
+  // The origin can intermittently return a rate-limit/error page with HTTP 200,
+  // or an upstream HTTP error. Reject those responses before XML parsing so the
+  // log identifies the actual response, then retry with bounded backoff.
   Future<DashManifest?> _fetchManifest({bool fromOrigin = false}) async {
     for (var attempt = 0; attempt < _manifestAttempts; attempt++) {
       // After a first failure, ignore the pinned .mpd and go back to origin.
@@ -694,16 +703,28 @@ class DashStreamServer {
           : _mpdUrl;
       try {
         final fetched = await _fetchFollowingRedirects(source);
-        _resolvedMpdUrl = fetched.$1;
         final body = utf8.decode(fetched.$2, allowMalformed: true);
-        return const DashManifestParser().parse(fetched.$1, body);
+        final mpdStart = body.indexOf('<MPD');
+        final mpdEnd = mpdStart < 0
+            ? -1
+            : body.indexOf('</MPD>', mpdStart);
+        if (mpdStart < 0 || mpdEnd < 0) {
+          throw FormatException(
+            'Response is not a complete DASH MPD '
+            '(content-type: ${fetched.$3 ?? 'unknown'}, '
+            'body: ${_manifestBodyPreview(fetched.$2)})',
+          );
+        }
+        final manifest = const DashManifestParser().parse(fetched.$1, body);
+        _resolvedMpdUrl = fetched.$1;
+        return manifest;
       } catch (error) {
         debugPrint(
           'dash: manifest fetch/parse failed '
           '(attempt ${attempt + 1}/$_manifestAttempts): $error',
         );
         if (attempt + 1 < _manifestAttempts) {
-          await Future<void>.delayed(const Duration(milliseconds: 600));
+          await Future<void>.delayed(_manifestRetryDelay(error, attempt));
         }
       }
     }
@@ -712,7 +733,41 @@ class DashStreamServer {
 
   static const int _manifestAttempts = 4;
 
-  Future<(String, Uint8List)> _fetchFollowingRedirects(String url) async {
+  static Duration _manifestRetryDelay(Object error, int attempt) {
+    final fallback = Duration(milliseconds: 600 * (1 << attempt));
+    if (error is! _ManifestFetchException || error.retryAfter == null) {
+      return fallback;
+    }
+    final requestedMs = error.retryAfter!.inMilliseconds;
+    if (requestedMs <= fallback.inMilliseconds) return fallback;
+    return Duration(milliseconds: requestedMs.clamp(0, 10000));
+  }
+
+  static Duration? _parseRetryAfter(String? value) {
+    if (value == null) return null;
+    final seconds = int.tryParse(value.trim());
+    if (seconds != null) return Duration(seconds: seconds);
+    try {
+      final delay = HttpDate.parse(value).difference(DateTime.now().toUtc());
+      return delay.isNegative ? Duration.zero : delay;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String _manifestBodyPreview(Uint8List bytes) {
+    final prefix = bytes.length <= 512 ? bytes : bytes.sublist(0, 512);
+    final text = utf8
+        .decode(prefix, allowMalformed: true)
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (text.isEmpty) return '<empty body>';
+    return text.length <= 160 ? text : '${text.substring(0, 160)}…';
+  }
+
+  Future<(String, Uint8List, String?)> _fetchFollowingRedirects(
+    String url,
+  ) async {
     final client = _client;
     if (client == null) throw StateError('DASH session has stopped');
     var current = Uri.parse(url);
@@ -730,7 +785,18 @@ class DashStreamServer {
         continue;
       }
       final bytes = await streamed.stream.toBytes();
-      return (current.toString(), bytes);
+      if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
+        throw _ManifestFetchException(
+          'Manifest HTTP ${streamed.statusCode} '
+          '(body: ${_manifestBodyPreview(bytes)})',
+          retryAfter: _parseRetryAfter(streamed.headers['retry-after']),
+        );
+      }
+      return (
+        current.toString(),
+        bytes,
+        streamed.headers['content-type'],
+      );
     }
     throw Exception('Too many redirects fetching $url');
   }
