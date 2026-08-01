@@ -13,6 +13,7 @@ import '../services/playlist_parser.dart';
 import '../services/xtream_service.dart';
 import '../theme.dart';
 import '../widgets/proxy_button.dart';
+import '../widgets/settings_backup_dialog.dart';
 import '../widgets/source_widgets.dart';
 import '../widgets/top_bar.dart';
 import '../widgets/user_agent_button.dart';
@@ -405,6 +406,8 @@ class _SourcesPageState extends State<SourcesPage> {
                   const UserAgentButton(),
                   const SizedBox(width: 10),
                   const ProxyButton(),
+                  const SizedBox(width: 10),
+                  const SettingsBackupButton(),
                 ],
               ),
               if (update.availableUpdate != null) ...[

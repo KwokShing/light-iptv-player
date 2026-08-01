@@ -18,6 +18,8 @@ import '../services/xtream_service.dart';
 class SourcesController extends ChangeNotifier {
   List<PlaylistSource> _sources = [];
   List<PlaylistSource> get sources => _sources;
+  List<PlaylistSource> get savedSources =>
+      List.unmodifiable(_sources.where((source) => source.id != _ephemeralId));
 
   bool _refreshingAll = false;
   bool get refreshingAll => _refreshingAll;
@@ -125,14 +127,39 @@ class SourcesController extends ChangeNotifier {
     await _save();
   }
 
+  /// Replaces every persisted source after a settings import. The update is
+  /// saved before it is published, so a storage failure leaves live state
+  /// untouched. Existing open sources are then replaced or removed via the
+  /// same event streams used by individual edits.
+  Future<void> replaceAll(List<PlaylistSource> sources) async {
+    final previousSources = _sources;
+    final previousEphemeralId = _ephemeralId;
+    _sources = List<PlaylistSource>.of(sources);
+    _ephemeralId = null;
+    try {
+      await _save();
+    } catch (_) {
+      _sources = previousSources;
+      _ephemeralId = previousEphemeralId;
+      rethrow;
+    }
+
+    notifyListeners();
+    final nextIds = _sources.map((source) => source.id).toSet();
+    for (final previous in previousSources) {
+      if (!nextIds.contains(previous.id)) _removed.add(previous.id);
+    }
+    final previousIds = previousSources.map((source) => source.id).toSet();
+    for (final source in _sources) {
+      if (previousIds.contains(source.id)) _replaced.add(source);
+    }
+  }
+
   // Insert the in-memory-only paste source. It shows up in [sources] and can be
   // played immediately, but is not written to disk (see [_save]). Any previous
   // ephemeral source is dropped first so only one is ever live.
   void upsertTemporary(PlaylistSource source) {
-    _sources = [
-      source,
-      ..._sources.where((item) => item.id != _ephemeralId),
-    ];
+    _sources = [source, ..._sources.where((item) => item.id != _ephemeralId)];
     _ephemeralId = source.id;
     notifyListeners();
   }
