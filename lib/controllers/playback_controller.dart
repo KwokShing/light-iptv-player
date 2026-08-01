@@ -97,8 +97,16 @@ class PlaybackController extends ChangeNotifier {
   VideoParams videoParams = const VideoParams();
   Track selectedTrack = const Track();
 
+  /// Subtitles are enabled afresh for every selected channel. This lets HLS
+  /// WebVTT renditions and embedded container tracks follow their default or
+  /// forced disposition without carrying an "off" choice to the next video.
+  bool subtitlesEnabled = true;
+  List<SubtitleTrack> subtitleTracks = const [];
+  String? _pendingDefaultSubtitleId;
+
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   StreamSubscription<Track>? _trackSubscription;
+  StreamSubscription<Tracks>? _tracksSubscription;
   StreamSubscription<bool>? _completedSubscription;
   StreamSubscription<bool>? _playingSubscription;
   StreamSubscription<bool>? _bufferingSubscription;
@@ -223,6 +231,7 @@ class PlaybackController extends ChangeNotifier {
     final subscriptions = <StreamSubscription<dynamic>?>[
       _videoParamsSubscription,
       _trackSubscription,
+      _tracksSubscription,
       _completedSubscription,
       _playingSubscription,
       _bufferingSubscription,
@@ -233,6 +242,7 @@ class PlaybackController extends ChangeNotifier {
     ];
     _videoParamsSubscription = null;
     _trackSubscription = null;
+    _tracksSubscription = null;
     _completedSubscription = null;
     _playingSubscription = null;
     _bufferingSubscription = null;
@@ -327,6 +337,11 @@ class PlaybackController extends ChangeNotifier {
         // that line reaches player.stream.log; the extra chatter is filtered in
         // the log listener before it reaches the debug UI.
         logLevel: MPVLogLevel.info,
+        // Let libmpv render subtitles into the video texture. Flutter's
+        // SubtitleView only receives text cues, so it cannot display bitmap
+        // formats such as DVB/PGS; native rendering supports both bitmap and
+        // text subtitles without changing the video's layout or dimensions.
+        libass: true,
         // Bound native read-ahead memory. A large value is especially costly
         // while switching channels because decoder and demuxer allocations may
         // coexist briefly until libmpv finishes releasing the old stream.
@@ -348,10 +363,120 @@ class PlaybackController extends ChangeNotifier {
     return (nextPlayer, nextVideoController);
   }
 
+  bool _refreshSubtitleTracks(Iterable<SubtitleTrack> tracks) {
+    final next = tracks
+        .where((track) {
+          final id = track.id.toLowerCase();
+          return id != 'auto' && id != 'no';
+        })
+        .toList(growable: false);
+    final unchanged =
+        subtitleTracks.length == next.length &&
+        List.generate(
+          next.length,
+          (index) => index,
+        ).every((index) => subtitleTracks[index].id == next[index].id);
+    if (unchanged) return false;
+
+    subtitleTracks = List<SubtitleTrack>.unmodifiable(next);
+    final selectedId = selectedTrack.subtitle.id.toLowerCase();
+    if (subtitlesEnabled &&
+        next.isNotEmpty &&
+        (selectedId.isEmpty || selectedId == 'auto' || selectedId == 'no')) {
+      unawaited(_selectDiscoveredSubtitle(next.first));
+    }
+    return true;
+  }
+
+  Map<String, String> get _nativeSubtitleOptions => {
+    'sub-visibility': subtitlesEnabled ? 'yes' : 'no',
+    'sub-font': 'Microsoft JhengHei',
+    'sub-font-size': '56',
+    'sub-color': '#FFFFFFFF',
+    'sub-back-color': '#00000000',
+    'sub-border-color': '#FF303030',
+    'sub-border-size': '1.0',
+    'sub-shadow-offset': '0',
+    'sub-bold': 'no',
+    'sub-italic': 'no',
+    'sub-use-margins': 'no',
+    'sub-ass-force-margins': 'no',
+    'sub-margin-x': '0',
+    'sub-margin-y': '0',
+    'video-margin-ratio-left': '0',
+    'video-margin-ratio-right': '0',
+    'video-margin-ratio-top': '0',
+    'video-margin-ratio-bottom': '0',
+    'sub-pos': '96',
+    'sub-ass-override': 'force',
+  };
+
+  Future<void> _applyNativeSubtitleOptions() async {
+    final platform = hasPlaybackEngine ? player.platform : null;
+    if (platform == null) return;
+    for (final option in _nativeSubtitleOptions.entries) {
+      try {
+        await (platform as dynamic).setProperty(option.key, option.value);
+      } catch (error) {
+        debugPrint('Failed to apply ${option.key}: $error');
+      }
+    }
+  }
+
+  Future<void> _setNativeSubtitleVisibility(bool visible) async {
+    final platform = hasPlaybackEngine ? player.platform : null;
+    if (platform == null) return;
+    try {
+      await (platform as dynamic).setProperty(
+        'sub-visibility',
+        visible ? 'yes' : 'no',
+      );
+    } catch (error) {
+      debugPrint('Failed to set native subtitle visibility: $error');
+    }
+  }
+
+  Future<void> _selectDiscoveredSubtitle(SubtitleTrack track) async {
+    if (_pendingDefaultSubtitleId == track.id) return;
+    _pendingDefaultSubtitleId = track.id;
+    try {
+      if (_disposed || !subtitlesEnabled || nowPlaying == null) return;
+      // DVB subtitles embedded in MPEG-TS commonly have default=0, so mpv's
+      // `auto` selector leaves them off. Selecting the first real track keeps
+      // the app's "subtitles on for every video" behaviour deterministic.
+      await _setNativeSubtitleVisibility(true);
+      await player.setSubtitleTrack(track);
+    } catch (error) {
+      debugPrint('Failed to select discovered subtitle ${track.id}: $error');
+    } finally {
+      if (_pendingDefaultSubtitleId == track.id) {
+        _pendingDefaultSubtitleId = null;
+      }
+    }
+  }
+
+  Future<void> _refreshSubtitleTracksAfterOpen(int request) async {
+    // HLS manifests can omit EXT-X-MEDIA and carry DVB subtitles only inside
+    // MPEG-TS segments. Poll briefly while the first segment is demuxed because
+    // not every libmpv build emits another tracks event for that late discovery.
+    for (final delay in const [
+      Duration(milliseconds: 350),
+      Duration(milliseconds: 750),
+      Duration(milliseconds: 1500),
+    ]) {
+      await Future<void>.delayed(delay);
+      if (_disposed || request != playbackRequest || nowPlaying == null) return;
+      if (_refreshSubtitleTracks(player.state.tracks.subtitle)) {
+        notifyListeners();
+      }
+    }
+  }
+
   void _listenPlaybackInfo() {
     _videoParamsSubscription = player.stream.videoParams.listen((params) {
       if (_disposed) return;
       videoParams = params;
+      _refreshSubtitleTracks(player.state.tracks.subtitle);
       notifyListeners();
       // Real decoded dimensions are proof the stream actually started (unlike
       // the `playing`/pause event, which fires the moment a file opens). Use it
@@ -363,9 +488,22 @@ class PlaybackController extends ChangeNotifier {
     _trackSubscription = player.stream.track.listen((track) {
       if (_disposed) return;
       debugPrint(
-        'Selected track changed: audio.id=${track.audio.id} audio.title=${track.audio.title}',
+        'Selected track changed: audio.id=${track.audio.id} audio.title=${track.audio.title} '
+        'subtitle.id=${track.subtitle.id} subtitle.title=${track.subtitle.title}',
       );
       selectedTrack = track;
+      _pendingDefaultSubtitleId = null;
+      _refreshSubtitleTracks(player.state.tracks.subtitle);
+      notifyListeners();
+    });
+    _tracksSubscription = player.stream.tracks.listen((tracks) {
+      if (_disposed) return;
+      // media_kit includes its synthetic `auto` and `no` controls in the
+      // subtitle list. They are selection commands, not media tracks; exposing
+      // them here made a video with zero subtitles appear to have two unnamed
+      // tracks. The menu supplies Auto/Off separately, so retain only tracks
+      // that actually came from the HLS manifest or media container.
+      _refreshSubtitleTracks(tracks.subtitle);
       notifyListeners();
     });
     // Some IPTV streams are delivered in segments: the server closes the
@@ -953,6 +1091,43 @@ class PlaybackController extends ChangeNotifier {
     return null;
   }
 
+  Future<void> setSubtitlesEnabled(bool enabled) async {
+    subtitlesEnabled = enabled;
+    _pendingDefaultSubtitleId = null;
+    notifyListeners();
+    if (!hasPlaybackEngine || nowPlaying == null) return;
+    try {
+      if (enabled) await _setNativeSubtitleVisibility(true);
+      await player.setSubtitleTrack(
+        enabled && subtitleTracks.isNotEmpty
+            ? subtitleTracks.first
+            : enabled
+            ? SubtitleTrack.auto()
+            : SubtitleTrack.no(),
+      );
+      if (!enabled) await _setNativeSubtitleVisibility(false);
+    } catch (error) {
+      debugPrint(
+        'Failed to ${enabled ? 'enable' : 'disable'} subtitles: $error',
+      );
+      _showMessage('Subtitle error');
+    }
+  }
+
+  Future<void> selectSubtitleTrack(SubtitleTrack track) async {
+    subtitlesEnabled = true;
+    _pendingDefaultSubtitleId = null;
+    notifyListeners();
+    if (!hasPlaybackEngine || nowPlaying == null) return;
+    try {
+      await _setNativeSubtitleVisibility(true);
+      await player.setSubtitleTrack(track);
+    } catch (error) {
+      debugPrint('Failed to select subtitle track ${track.id}: $error');
+      _showMessage('Subtitle error');
+    }
+  }
+
   Future<void> play(Channel channel) async {
     final request = ++playbackRequest;
     // Returning home fully releases libmpv. Recreate it only when the user
@@ -996,6 +1171,9 @@ class PlaybackController extends ChangeNotifier {
     nowPlaying = channel;
     videoParams = const VideoParams();
     selectedTrack = const Track();
+    subtitlesEnabled = true;
+    subtitleTracks = const [];
+    _pendingDefaultSubtitleId = null;
     position = Duration.zero;
     duration = Duration.zero;
     _seeking = false;
@@ -1150,6 +1328,24 @@ class PlaybackController extends ChangeNotifier {
     );
     if (_disposed || request != playbackRequest) return;
     await player.open(Media(streamUrl));
+    if (_disposed || request != playbackRequest) return;
+    // mpv resets several subtitle/video margin properties when loading a new
+    // file. Re-apply them after open so the decoded frame fills the texture and
+    // text subtitles stay over the active picture instead of a bottom strip.
+    await _applyNativeSubtitleOptions();
+    if (_disposed || request != playbackRequest) return;
+    // Explicitly restore automatic subtitle selection for every channel. This
+    // covers default HLS WebVTT renditions as well as default/forced embedded
+    // subtitle tracks, even if subtitles were switched off on the last video.
+    try {
+      await player.setSubtitleTrack(SubtitleTrack.auto());
+    } catch (error) {
+      debugPrint('Failed to auto-select subtitles: $error');
+    }
+    if (_refreshSubtitleTracks(player.state.tracks.subtitle)) {
+      notifyListeners();
+    }
+    unawaited(_refreshSubtitleTracksAfterOpen(request));
     _engineDirty = true;
     // A recreated engine starts at mpv's default volume (100, unmuted), so the
     // controller's current volume/mute state must be pushed back onto it —
@@ -1291,6 +1487,8 @@ class PlaybackController extends ChangeNotifier {
         if (_disposed || request != playbackRequest) return;
         await player.open(Media(reloadUrl));
       }
+      if (_disposed || request != playbackRequest) return;
+      await _applyNativeSubtitleOptions();
     } catch (error) {
       debugPrint('Reconnect failed: $error');
       if (!_disposed && request == playbackRequest) {
@@ -1512,6 +1710,15 @@ class PlaybackController extends ChangeNotifier {
       'hwdec': 'auto',
       'interpolation': 'no',
       'video-sync': 'audio',
+      // Native subtitle rendering supports text and bitmap tracks. Keep these
+      // options in one map because file-local mpv properties are re-applied
+      // after every open below.
+      ..._nativeSubtitleOptions,
+      // The app supplies its own normal and fullscreen controls. Keep mpv's
+      // built-in OSC/OSD bar disabled so it cannot reserve or darken a strip at
+      // the bottom of the native video surface.
+      'osc': 'no',
+      'osd-bar': 'no',
       // youtube-dl / yt-dlp is not bundled with the app, so mpv's ytdl_hook can
       // never succeed. Left enabled it hijacks every failed open, spends the
       // 20s ytdl grace period trying to spawn a missing binary, and floods the

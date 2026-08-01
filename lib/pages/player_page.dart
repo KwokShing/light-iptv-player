@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:media_kit_video/media_kit_video.dart';
 import 'package:provider/provider.dart';
 
 import '../constants.dart';
@@ -189,18 +188,29 @@ class _PlayerPageState extends State<PlayerPage> {
                                         children: [
                                           const ColoredBox(color: Colors.black),
                                           if (playback.hasPlaybackEngine)
-                                            Video(
+                                            ValueListenableBuilder<int?>(
                                               key: ValueKey(
                                                 playback.engineGeneration,
                                               ),
-                                              controller:
-                                                  playback.videoController,
-                                              fit: BoxFit.contain,
-                                              controls: NoVideoControls,
-                                              subtitleViewConfiguration:
-                                                  const SubtitleViewConfiguration(
-                                                    visible: false,
-                                                  ),
+                                              valueListenable:
+                                                  playback.videoController.id,
+                                              builder: (context, textureId, _) {
+                                                if (textureId == null) {
+                                                  return const SizedBox.shrink();
+                                                }
+                                                // The outer AspectRatio already
+                                                // matches the decoded display
+                                                // size. Paint the native texture
+                                                // directly into that rect so
+                                                // media_kit's additional rect +
+                                                // FittedBox layer cannot expose
+                                                // a black strip underneath it.
+                                                return Texture(
+                                                  textureId: textureId,
+                                                  filterQuality:
+                                                      FilterQuality.low,
+                                                );
+                                              },
                                             ),
                                           // Hold the last decoded frame over
                                           // the video while reconnecting so a
@@ -310,6 +320,23 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   playback.nowPlaying == null
                                                   ? null
                                                   : playback.takeSnapshot,
+                                              subtitlesEnabled:
+                                                  playback.subtitlesEnabled,
+                                              subtitleTracks:
+                                                  playback.subtitleTracks,
+                                              selectedSubtitle: playback
+                                                  .selectedTrack
+                                                  .subtitle,
+                                              onToggleSubtitles:
+                                                  playback.nowPlaying == null
+                                                  ? null
+                                                  : playback
+                                                        .setSubtitlesEnabled,
+                                              onSubtitleTrack:
+                                                  playback.nowPlaying == null
+                                                  ? null
+                                                  : playback
+                                                        .selectSubtitleTrack,
                                               deinterlace: playback.deinterlace,
                                               onDeinterlace:
                                                   playback.nowPlaying == null
@@ -343,6 +370,16 @@ class _PlayerPageState extends State<PlayerPage> {
                                   onSeekEnd: playback.nowPlaying == null
                                       ? null
                                       : playback.onSeekEnd,
+                                  subtitlesEnabled: playback.subtitlesEnabled,
+                                  subtitleTracks: playback.subtitleTracks,
+                                  selectedSubtitle:
+                                      playback.selectedTrack.subtitle,
+                                  onToggleSubtitles: playback.nowPlaying == null
+                                      ? null
+                                      : playback.setSubtitlesEnabled,
+                                  onSubtitleTrack: playback.nowPlaying == null
+                                      ? null
+                                      : playback.selectSubtitleTrack,
                                   deinterlace: playback.deinterlace,
                                   onReplay: playback.nowPlaying == null
                                       ? null

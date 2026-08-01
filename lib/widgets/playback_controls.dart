@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:media_kit/media_kit.dart';
 
 import '../constants.dart';
 import '../models/playlist.dart';
@@ -20,6 +21,11 @@ class PlaybackControls extends StatelessWidget {
     required this.duration,
     required this.onSeekChanged,
     required this.onSeekEnd,
+    required this.subtitlesEnabled,
+    required this.subtitleTracks,
+    required this.selectedSubtitle,
+    required this.onToggleSubtitles,
+    required this.onSubtitleTrack,
     required this.deinterlace,
     required this.onReplay,
     required this.onPlayPause,
@@ -44,6 +50,11 @@ class PlaybackControls extends StatelessWidget {
   final Duration duration;
   final ValueChanged<double>? onSeekChanged;
   final ValueChanged<double>? onSeekEnd;
+  final bool subtitlesEnabled;
+  final List<SubtitleTrack> subtitleTracks;
+  final SubtitleTrack selectedSubtitle;
+  final ValueChanged<bool>? onToggleSubtitles;
+  final ValueChanged<SubtitleTrack>? onSubtitleTrack;
   final bool deinterlace;
   final VoidCallback? onReplay;
   final VoidCallback? onPlayPause;
@@ -115,7 +126,9 @@ class PlaybackControls extends StatelessWidget {
                             const SizedBox(width: 10),
                             SizedBox(
                               width: 320,
-                              child: _StreamUrlBar(url: streamUrlController.text),
+                              child: _StreamUrlBar(
+                                url: streamUrlController.text,
+                              ),
                             ),
                           ],
                         ],
@@ -213,6 +226,11 @@ class PlaybackControls extends StatelessWidget {
                       onPressed: onGuide,
                     ),
                   _RightControls(
+                    subtitlesEnabled: subtitlesEnabled,
+                    subtitleTracks: subtitleTracks,
+                    selectedSubtitle: selectedSubtitle,
+                    onToggleSubtitles: hasChannel ? onToggleSubtitles : null,
+                    onSubtitleTrack: hasChannel ? onSubtitleTrack : null,
                     deinterlace: deinterlace,
                     onDeinterlace: onDeinterlace,
                     onSnapshot: onSnapshot,
@@ -306,6 +324,11 @@ class FullscreenControls extends StatelessWidget {
     required this.onStop,
     required this.onMute,
     required this.onSnapshot,
+    required this.subtitlesEnabled,
+    required this.subtitleTracks,
+    required this.selectedSubtitle,
+    required this.onToggleSubtitles,
+    required this.onSubtitleTrack,
     required this.deinterlace,
     required this.onDeinterlace,
     required this.onExitFullscreen,
@@ -325,6 +348,11 @@ class FullscreenControls extends StatelessWidget {
   final VoidCallback? onStop;
   final VoidCallback? onMute;
   final VoidCallback? onSnapshot;
+  final bool subtitlesEnabled;
+  final List<SubtitleTrack> subtitleTracks;
+  final SubtitleTrack selectedSubtitle;
+  final ValueChanged<bool>? onToggleSubtitles;
+  final ValueChanged<SubtitleTrack>? onSubtitleTrack;
   final bool deinterlace;
   final VoidCallback? onDeinterlace;
   final VoidCallback? onExitFullscreen;
@@ -344,13 +372,6 @@ class FullscreenControls extends StatelessWidget {
           duration: const Duration(milliseconds: 180),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: [Color(0xcc000000), Color(0x00000000)],
-              ),
-            ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -403,6 +424,15 @@ class FullscreenControls extends StatelessWidget {
                         ],
                       ),
                     ),
+                    _SubtitleButton(
+                      enabled: channel != null && subtitleTracks.isNotEmpty,
+                      subtitlesEnabled: subtitlesEnabled,
+                      tracks: subtitleTracks,
+                      selected: selectedSubtitle,
+                      onToggle: onToggleSubtitles,
+                      onTrack: onSubtitleTrack,
+                      foregroundColor: Colors.white,
+                    ),
                     TransportButton(
                       icon: Icons.deblur_rounded,
                       tooltip: deinterlace
@@ -434,17 +464,127 @@ class FullscreenControls extends StatelessWidget {
   }
 }
 
+class _SubtitleButton extends StatelessWidget {
+  const _SubtitleButton({
+    required this.enabled,
+    required this.subtitlesEnabled,
+    required this.tracks,
+    required this.selected,
+    required this.onToggle,
+    required this.onTrack,
+    this.foregroundColor,
+  });
+
+  final bool enabled;
+  final bool subtitlesEnabled;
+  final List<SubtitleTrack> tracks;
+  final SubtitleTrack selected;
+  final ValueChanged<bool>? onToggle;
+  final ValueChanged<SubtitleTrack>? onTrack;
+  final Color? foregroundColor;
+
+  String _trackLabel(SubtitleTrack track, int index) {
+    final title = track.title?.trim();
+    final language = track.language?.trim();
+    if (title != null && title.isNotEmpty) {
+      return language != null &&
+              language.isNotEmpty &&
+              language.toLowerCase() != title.toLowerCase()
+          ? '$title ($language)'
+          : title;
+    }
+    if (language != null && language.isNotEmpty) return language;
+    return 'Subtitle ${index + 1}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final activeColor = foregroundColor ?? AppColors.accent;
+    return SizedBox(
+      width: 40,
+      height: 40,
+      child: PopupMenuButton<String>(
+        enabled: enabled,
+        tooltip: tracks.isEmpty
+            ? 'No subtitles available'
+            : subtitlesEnabled
+            ? 'Subtitles: On'
+            : 'Subtitles: Off',
+        padding: EdgeInsets.zero,
+        icon: Icon(
+          Icons.closed_caption_rounded,
+          size: 20,
+          color: !enabled
+              ? AppColors.textMuted.withValues(alpha: 0.45)
+              : subtitlesEnabled
+              ? activeColor
+              : foregroundColor ?? AppColors.textMuted,
+        ),
+        onSelected: (value) {
+          if (value == 'toggle') {
+            onToggle?.call(!subtitlesEnabled);
+            return;
+          }
+          if (value == 'auto') {
+            onTrack?.call(SubtitleTrack.auto());
+            return;
+          }
+          final index = int.tryParse(value.substring('track:'.length));
+          if (index != null && index >= 0 && index < tracks.length) {
+            onTrack?.call(tracks[index]);
+          }
+        },
+        itemBuilder: (context) => [
+          CheckedPopupMenuItem<String>(
+            value: 'toggle',
+            checked: subtitlesEnabled,
+            child: const Text('Show subtitles'),
+          ),
+          const PopupMenuDivider(),
+          CheckedPopupMenuItem<String>(
+            value: 'auto',
+            checked: subtitlesEnabled && selected.id == 'auto',
+            child: const Text('Auto (default)'),
+          ),
+          if (tracks.isEmpty)
+            const PopupMenuItem<String>(
+              enabled: false,
+              child: Text('No subtitle tracks detected'),
+            )
+          else
+            for (var index = 0; index < tracks.length; index++)
+              CheckedPopupMenuItem<String>(
+                value: 'track:$index',
+                checked: subtitlesEnabled && selected.id == tracks[index].id,
+                child: Text(_trackLabel(tracks[index], index)),
+              ),
+        ],
+      ),
+    );
+  }
+}
+
 /// The status/action cluster pinned to the right edge of the transport bar:
-/// the deinterlace, snapshot and fullscreen buttons. Grouped so it keeps a
-/// stable position regardless of how long the adjacent playback-info text is.
+/// the subtitle, deinterlace, snapshot and fullscreen buttons. Grouped so it
+/// keeps a stable position regardless of adjacent playback-info text length.
 class _RightControls extends StatelessWidget {
   const _RightControls({
+    required this.subtitlesEnabled,
+    required this.subtitleTracks,
+    required this.selectedSubtitle,
+    required this.onToggleSubtitles,
+    required this.onSubtitleTrack,
     required this.deinterlace,
     required this.onDeinterlace,
     required this.onSnapshot,
     required this.onFullscreen,
   });
 
+  final bool subtitlesEnabled;
+  final List<SubtitleTrack> subtitleTracks;
+  final SubtitleTrack selectedSubtitle;
+  final ValueChanged<bool>? onToggleSubtitles;
+  final ValueChanged<SubtitleTrack>? onSubtitleTrack;
   final bool deinterlace;
   final VoidCallback? onDeinterlace;
   final VoidCallback? onSnapshot;
@@ -455,10 +595,17 @@ class _RightControls extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        _SubtitleButton(
+          enabled: onToggleSubtitles != null && subtitleTracks.isNotEmpty,
+          subtitlesEnabled: subtitlesEnabled,
+          tracks: subtitleTracks,
+          selected: selectedSubtitle,
+          onToggle: onToggleSubtitles,
+          onTrack: onSubtitleTrack,
+        ),
         TransportButton(
           icon: Icons.deblur_rounded,
-          tooltip:
-              deinterlace ? 'Deinterlace: On (D)' : 'Deinterlace: Off (D)',
+          tooltip: deinterlace ? 'Deinterlace: On (D)' : 'Deinterlace: Off (D)',
           onPressed: onDeinterlace,
           color: deinterlace ? AppColors.accent : null,
         ),
