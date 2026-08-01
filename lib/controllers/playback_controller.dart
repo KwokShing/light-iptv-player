@@ -351,12 +351,16 @@ class PlaybackController extends ChangeNotifier {
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
-        // `auto` uses the zero-copy interop path: hardware-decoded frames stay
-        // in GPU memory and are shared with ANGLE directly (no readback), which
-        // is the cheapest path. Note: on Windows this interop has been known to
-        // crash the native process for some IPTV codecs/resolutions; if that
-        // resurfaces, switch back to `auto-copy` (hardware decode + readback).
-        hwdec: 'auto',
+        // `auto-copy` (hardware decode + readback) instead of the zero-copy
+        // `auto` interop path. On Windows the zero-copy d3d11va/ANGLE interop
+        // renders the decoder's alignment padding: HEVC 1920x1080 streams
+        // decode into a padded surface (rows/columns rounded up to the codec
+        // alignment) and the un-cropped surface reaches the shared texture,
+        // which shows up as a black bar at the bottom (and left) of the video.
+        // The copy path crops to the visible size during readback, fixing e.g.
+        // the HLS + WebVTT HEVC channels. Zero-copy also crashed the native
+        // process for some IPTV codecs/resolutions in the past.
+        hwdec: 'auto-copy',
         enableHardwareAcceleration: true,
       ),
     );
@@ -1707,7 +1711,10 @@ class PlaybackController extends ChangeNotifier {
     // are very expensive at 4K60 and noticeably delay first frame.
     _interpolationConfigured = false;
     final options = {
-      'hwdec': 'auto',
+      // Keep in sync with VideoControllerConfiguration.hwdec: the zero-copy
+      // path leaks HEVC decoder padding as a black bottom/left bar (see
+      // _createPlaybackEngine).
+      'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
       // Native subtitle rendering supports text and bitmap tracks. Keep these
