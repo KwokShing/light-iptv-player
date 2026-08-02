@@ -292,13 +292,16 @@ class DashStreamServer {
     if (subtitleTrack != null) {
       try {
         final videoStartUs = video.index.getTimeUs(segmentNum);
-        final firstSubtitleSegment = subtitleTrack.index.getSegmentNum(
+        final firstSubtitleSegment = _segmentCoveringTime(
+          subtitleTrack.index,
           videoStartUs,
           periodDurationUs,
         );
-        subtitleTimelineOriginUs = subtitleTrack.index.getTimeUs(
-          firstSubtitleSegment,
-        );
+        if (firstSubtitleSegment != null) {
+          subtitleTimelineOriginUs = subtitleTrack.index.getTimeUs(
+            firstSubtitleSegment,
+          );
+        }
       } catch (error) {
         debugPrint('dash: subtitle timeline origin failed: $error');
       }
@@ -522,6 +525,34 @@ class DashStreamServer {
   // decrypts them and muxes them into one fragment. Subtitle segment numbers
   // are resolved from the video presentation time because DASH adaptation
   // sets may use different start numbers or segment durations.
+  bool _isSegmentDefined(
+    DashSegmentIndex index,
+    int segmentNum,
+    int periodDurationUs,
+  ) {
+    final first = index.getFirstSegmentNum();
+    final count = index.getSegmentCount(periodDurationUs);
+    return segmentNum >= first &&
+        (count == DashSegmentIndex.indexUnbounded ||
+            segmentNum < first + count);
+  }
+
+  int? _segmentCoveringTime(
+    DashSegmentIndex index,
+    int timeUs,
+    int periodDurationUs,
+  ) {
+    final count = index.getSegmentCount(periodDurationUs);
+    if (count == 0) return null;
+    final candidate = index.getSegmentNum(timeUs, periodDurationUs);
+    if (!_isSegmentDefined(index, candidate, periodDurationUs)) return null;
+    final startUs = index.getTimeUs(candidate);
+    final durationUs = index.getDurationUs(candidate, periodDurationUs);
+    return timeUs >= startUs && timeUs < startUs + durationUs
+        ? candidate
+        : null;
+  }
+
   Future<Uint8List?> _loadMuxedFragment(
     _SelectedTrack video,
     _SelectedTrack? audio,
@@ -533,21 +564,30 @@ class DashStreamServer {
     int session,
     int? subtitleTimelineOriginUs,
   ) async {
+    // A refreshed live manifest can temporarily end before the old playback
+    // cursor. Let the existing edge refresh/re-anchor path handle that miss
+    // instead of indexing the new timeline with an out-of-range segment.
+    if (!_isSegmentDefined(video.index, segmentNum, periodDurationUs)) {
+      return null;
+    }
+
     int? subtitleSegmentNum;
     String? subtitleSegmentKey;
     if (subtitle != null) {
       try {
         final presentationTimeUs = video.index.getTimeUs(segmentNum);
-        final candidate = subtitle.index.getSegmentNum(
+        final candidate = _segmentCoveringTime(
+          subtitle.index,
           presentationTimeUs,
           periodDurationUs,
         );
-        final key =
-            '${subtitle.baseUrl}|'
-            '${subtitle.representation.format.id}|$candidate';
-        if (scheduledSubtitleSegments.add(key)) {
-          subtitleSegmentNum = candidate;
-          subtitleSegmentKey = key;
+        if (candidate != null) {
+          final segmentStartUs = subtitle.index.getTimeUs(candidate);
+          final key = '${subtitle.representation.format.id}|$segmentStartUs';
+          if (scheduledSubtitleSegments.add(key)) {
+            subtitleSegmentNum = candidate;
+            subtitleSegmentKey = key;
+          }
         }
       } catch (error) {
         debugPrint('dash: subtitle segment lookup failed: $error');
