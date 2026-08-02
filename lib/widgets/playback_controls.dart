@@ -22,6 +22,7 @@ class PlaybackControls extends StatelessWidget {
     required this.onSeekChanged,
     required this.onSeekEnd,
     required this.subtitlesEnabled,
+    required this.subtitlesAvailable,
     required this.subtitleTracks,
     required this.selectedSubtitle,
     required this.onToggleSubtitles,
@@ -51,6 +52,7 @@ class PlaybackControls extends StatelessWidget {
   final ValueChanged<double>? onSeekChanged;
   final ValueChanged<double>? onSeekEnd;
   final bool subtitlesEnabled;
+  final bool subtitlesAvailable;
   final List<SubtitleTrack> subtitleTracks;
   final SubtitleTrack selectedSubtitle;
   final ValueChanged<bool>? onToggleSubtitles;
@@ -227,6 +229,7 @@ class PlaybackControls extends StatelessWidget {
                     ),
                   _RightControls(
                     subtitlesEnabled: subtitlesEnabled,
+                    subtitlesAvailable: subtitlesAvailable,
                     subtitleTracks: subtitleTracks,
                     selectedSubtitle: selectedSubtitle,
                     onToggleSubtitles: hasChannel ? onToggleSubtitles : null,
@@ -325,6 +328,7 @@ class FullscreenControls extends StatelessWidget {
     required this.onMute,
     required this.onSnapshot,
     required this.subtitlesEnabled,
+    required this.subtitlesAvailable,
     required this.subtitleTracks,
     required this.selectedSubtitle,
     required this.onToggleSubtitles,
@@ -349,6 +353,7 @@ class FullscreenControls extends StatelessWidget {
   final VoidCallback? onMute;
   final VoidCallback? onSnapshot;
   final bool subtitlesEnabled;
+  final bool subtitlesAvailable;
   final List<SubtitleTrack> subtitleTracks;
   final SubtitleTrack selectedSubtitle;
   final ValueChanged<bool>? onToggleSubtitles;
@@ -425,7 +430,10 @@ class FullscreenControls extends StatelessWidget {
                       ),
                     ),
                     _SubtitleButton(
-                      enabled: channel != null && subtitleTracks.isNotEmpty,
+                      enabled:
+                          channel != null &&
+                          onToggleSubtitles != null &&
+                          subtitlesAvailable,
                       subtitlesEnabled: subtitlesEnabled,
                       tracks: subtitleTracks,
                       selected: selectedSubtitle,
@@ -505,7 +513,7 @@ class _SubtitleButton extends StatelessWidget {
       height: 40,
       child: PopupMenuButton<String>(
         enabled: enabled,
-        tooltip: tracks.isEmpty
+        tooltip: !enabled
             ? 'No subtitles available'
             : subtitlesEnabled
             ? 'Subtitles: On'
@@ -541,23 +549,23 @@ class _SubtitleButton extends StatelessWidget {
             child: const Text('Show subtitles'),
           ),
           const PopupMenuDivider(),
-          CheckedPopupMenuItem<String>(
-            value: 'auto',
-            checked: subtitlesEnabled && selected.id == 'auto',
-            child: const Text('Auto (default)'),
-          ),
           if (tracks.isEmpty)
             const PopupMenuItem<String>(
               enabled: false,
-              child: Text('No subtitle tracks detected'),
-            )
-          else
-            for (var index = 0; index < tracks.length; index++)
-              CheckedPopupMenuItem<String>(
-                value: 'track:$index',
-                checked: subtitlesEnabled && selected.id == tracks[index].id,
-                child: Text(_trackLabel(tracks[index], index)),
-              ),
+              child: Text('s10000_chi'),
+            ),
+          if (tracks.isNotEmpty)
+            CheckedPopupMenuItem<String>(
+              value: 'auto',
+              checked: subtitlesEnabled && selected.id == 'auto',
+              child: const Text('Auto (default)'),
+            ),
+          for (var index = 0; index < tracks.length; index++)
+            CheckedPopupMenuItem<String>(
+              value: 'track:$index',
+              checked: subtitlesEnabled && selected.id == tracks[index].id,
+              child: Text(_trackLabel(tracks[index], index)),
+            ),
         ],
       ),
     );
@@ -570,6 +578,7 @@ class _SubtitleButton extends StatelessWidget {
 class _RightControls extends StatelessWidget {
   const _RightControls({
     required this.subtitlesEnabled,
+    required this.subtitlesAvailable,
     required this.subtitleTracks,
     required this.selectedSubtitle,
     required this.onToggleSubtitles,
@@ -581,6 +590,7 @@ class _RightControls extends StatelessWidget {
   });
 
   final bool subtitlesEnabled;
+  final bool subtitlesAvailable;
   final List<SubtitleTrack> subtitleTracks;
   final SubtitleTrack selectedSubtitle;
   final ValueChanged<bool>? onToggleSubtitles;
@@ -596,7 +606,7 @@ class _RightControls extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         _SubtitleButton(
-          enabled: onToggleSubtitles != null && subtitleTracks.isNotEmpty,
+          enabled: onToggleSubtitles != null && subtitlesAvailable,
           subtitlesEnabled: subtitlesEnabled,
           tracks: subtitleTracks,
           selected: selectedSubtitle,

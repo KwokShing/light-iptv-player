@@ -105,6 +105,9 @@ class DashStreamServer {
   Stream<List<DashSubtitleCue>> get subtitleCues =>
       _subtitleCueController.stream;
 
+  String? _ttmlSubtitleLabel;
+  String? get ttmlSubtitleLabel => _ttmlSubtitleLabel;
+
   // Preserve the tuned Android identity by default while allowing the global
   // setting to override it for every manifest and segment request.
   Map<String, String> get _originHeaders => {
@@ -143,6 +146,7 @@ class DashStreamServer {
 
   Future<void> stop() async {
     _sessionSeq++;
+    _ttmlSubtitleLabel = null;
     if (!_subtitleCueController.isClosed) {
       _subtitleCueController.add(const <DashSubtitleCue>[]);
     }
@@ -219,6 +223,9 @@ class DashStreamServer {
     final video = _selectVideo(manifest);
     final audio = _selectAudio(manifest);
     final subtitle = _selectSubtitle(manifest);
+    _ttmlSubtitleLabel = subtitle != null && _isTtmlSubtitle(subtitle)
+        ? subtitle.representation.format.id
+        : null;
     _renditionsLogged = true;
     if (video == null) {
       debugPrint('dash: no video representation found');
@@ -250,7 +257,13 @@ class DashStreamServer {
       debugPrint('dash: failed to load video init');
       return;
     }
-    final mergedInit = muxInit(videoInitRaw, audioInitRaw, subtitleInitRaw);
+    // TTML is parsed below and rendered by Flutter. Do not expose its stpp
+    // track to libmpv: the bundled libavcodec has no TTML subtitle converter,
+    // so including it only causes decoder errors. WebVTT remains native.
+    final nativeSubtitleInit = subtitle != null && _isTtmlSubtitle(subtitle)
+        ? null
+        : subtitleInitRaw;
+    final mergedInit = muxInit(videoInitRaw, audioInitRaw, nativeSubtitleInit);
     if (session != _sessionSeq) return;
     req.response.add(mergedInit);
     await req.response.flush();
@@ -561,13 +574,20 @@ class DashStreamServer {
       if (videoSeg == null) return null;
     }
     try {
-      final muxed = muxFragment(videoSeg, audioSeg, sequence, subtitleSeg);
-      if (subtitle != null &&
+      final isTtml = subtitle != null && _isTtmlSubtitle(subtitle);
+      // Keep downloading TTML for Dart parsing, but omit it from the fMP4
+      // consumed by libmpv. This prevents unsupported native TTML decoding.
+      final muxed = muxFragment(
+        videoSeg,
+        audioSeg,
+        sequence,
+        isTtml ? null : subtitleSeg,
+      );
+      if (isTtml &&
           subtitleSeg != null &&
           subtitleSegmentNum != null &&
           subtitleTimelineOriginUs != null &&
-          session == _sessionSeq &&
-          _isTtmlSubtitle(subtitle)) {
+          session == _sessionSeq) {
         final segmentStartUs = subtitle.index.getTimeUs(subtitleSegmentNum);
         final segmentDurationUs = subtitle.index.getDurationUs(
           subtitleSegmentNum,
@@ -872,9 +892,7 @@ class DashStreamServer {
         final fetched = await _fetchFollowingRedirects(source);
         final body = utf8.decode(fetched.$2, allowMalformed: true);
         final mpdStart = body.indexOf('<MPD');
-        final mpdEnd = mpdStart < 0
-            ? -1
-            : body.indexOf('</MPD>', mpdStart);
+        final mpdEnd = mpdStart < 0 ? -1 : body.indexOf('</MPD>', mpdStart);
         if (mpdStart < 0 || mpdEnd < 0) {
           throw FormatException(
             'Response is not a complete DASH MPD '
@@ -959,11 +977,7 @@ class DashStreamServer {
           retryAfter: _parseRetryAfter(streamed.headers['retry-after']),
         );
       }
-      return (
-        current.toString(),
-        bytes,
-        streamed.headers['content-type'],
-      );
+      return (current.toString(), bytes, streamed.headers['content-type']);
     }
     throw Exception('Too many redirects fetching $url');
   }

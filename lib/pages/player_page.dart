@@ -408,6 +408,8 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   : playback.takeSnapshot,
                                               subtitlesEnabled:
                                                   playback.subtitlesEnabled,
+                                              subtitlesAvailable:
+                                                  playback.subtitlesAvailable,
                                               subtitleTracks:
                                                   playback.subtitleTracks,
                                               selectedSubtitle: playback
@@ -457,6 +459,8 @@ class _PlayerPageState extends State<PlayerPage> {
                                       ? null
                                       : playback.onSeekEnd,
                                   subtitlesEnabled: playback.subtitlesEnabled,
+                                  subtitlesAvailable:
+                                      playback.subtitlesAvailable,
                                   subtitleTracks: playback.subtitleTracks,
                                   selectedSubtitle:
                                       playback.selectedTrack.subtitle,

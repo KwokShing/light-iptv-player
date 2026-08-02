@@ -110,6 +110,11 @@ class PlaybackController extends ChangeNotifier {
   final List<DashSubtitleCue> _dashSubtitleCues = [];
   final Set<String> _dashSubtitleCueKeys = {};
   bool _dashTtmlFallbackActive = false;
+  String? _dashTtmlSubtitleLabel;
+  bool get subtitlesAvailable =>
+      subtitleTracks.isNotEmpty || _dashTtmlFallbackActive;
+  String? get subtitleFallbackLabel =>
+      _dashTtmlFallbackActive ? _dashTtmlSubtitleLabel : null;
   Duration _rawPlaybackPosition = Duration.zero;
   String dashSubtitleText = '';
   StreamSubscription<List<DashSubtitleCue>>? _dashSubtitleSubscription;
@@ -419,15 +424,25 @@ class PlaybackController extends ChangeNotifier {
   void _handleDashSubtitleCues(List<DashSubtitleCue> cues) {
     if (_disposed) return;
     if (cues.isEmpty) {
-      final changed = dashSubtitleText.isNotEmpty;
+      final changed = dashSubtitleText.isNotEmpty || _dashTtmlFallbackActive;
       _dashSubtitleCues.clear();
       _dashSubtitleCueKeys.clear();
       _dashTtmlFallbackActive = false;
+      _dashTtmlSubtitleLabel = null;
       dashSubtitleText = '';
       if (changed) notifyListeners();
       return;
     }
 
+    final fallbackActivated = !_dashTtmlFallbackActive;
+    _dashTtmlFallbackActive = true;
+    _dashTtmlSubtitleLabel ??= _dashServer.ttmlSubtitleLabel;
+    if (fallbackActivated) {
+      DebugLogService.instance.add(
+        'Using Flutter TTML subtitle renderer',
+        source: 'app',
+      );
+    }
     for (final cue in cues) {
       final key =
           '${cue.start.inMicroseconds}|${cue.end.inMicroseconds}|'
@@ -447,13 +462,15 @@ class PlaybackController extends ChangeNotifier {
         );
       }
     }
-    if (_updateDashSubtitleText(_rawPlaybackPosition)) notifyListeners();
+    final subtitleChanged = _updateDashSubtitleText(_rawPlaybackPosition);
+    if (fallbackActivated || subtitleChanged) notifyListeners();
   }
 
   void _resetDashSubtitleFallback() {
     _dashSubtitleCues.clear();
     _dashSubtitleCueKeys.clear();
     _dashTtmlFallbackActive = false;
+    _dashTtmlSubtitleLabel = null;
     _rawPlaybackPosition = Duration.zero;
     dashSubtitleText = '';
   }
@@ -757,20 +774,6 @@ class PlaybackController extends ChangeNotifier {
       // means the bundled libmpv cannot decode it, so switch straight to the
       // AV3A-to-AAC bridge instead of playing on silently.
       final logText = log.text.toLowerCase();
-      final missingTtmlDecoder =
-          logText.contains('could not find subtitle decoder') &&
-          logText.contains('ttml');
-      if (!_dashTtmlFallbackActive &&
-          nowPlaying?.isEncryptedDash == true &&
-          missingTtmlDecoder) {
-        _dashTtmlFallbackActive = true;
-        final changed = _updateDashSubtitleText(_rawPlaybackPosition);
-        DebugLogService.instance.add(
-          'Native TTML decoder unavailable; using Flutter subtitle fallback',
-          source: 'app',
-        );
-        if (changed) notifyListeners();
-      }
       // mpv's curl network layer refuses HTTPS origins whose TLS certificate
       // can't be verified (self-signed/expired/untrusted CA), printing e.g.
       // "TLS certificate verification failed" / "SSL peer certificate ... was
