@@ -18,8 +18,13 @@ const int _subtitleTrackId = 3;
 /// `wvtt` or `stpp`), not a raw WebVTT/TTML document.
 Uint8List muxInit(Uint8List video, Uint8List? audio, [Uint8List? subtitle]) {
   final videoBoxes = parseBoxes(video, 0, video.length);
-  final videoMoov = _find(videoBoxes, 'moov');
-  if (videoMoov == null) return video;
+  final videoMoovs = videoBoxes.where((box) => box.type == 'moov').toList();
+  if (videoMoovs.length != 1) {
+    throw FormatException(
+      'Expected exactly one moov in video init, found ${videoMoovs.length}',
+    );
+  }
+  final videoMoov = videoMoovs.single;
 
   final videoTrak = videoMoov.child('trak');
   if (videoTrak != null) _setTrackId(videoTrak, _videoTrackId);
@@ -34,7 +39,8 @@ Uint8List muxInit(Uint8List video, Uint8List? audio, [Uint8List? subtitle]) {
   }
   _setMvhdNextTrackId(videoMoov, highestTrackId + 1);
 
-  return serializeBoxes(videoBoxes);
+  final ftyp = videoBoxes.where((box) => box.type == 'ftyp').firstOrNull;
+  return serializeBoxes([?ftyp, videoMoov]);
 }
 
 bool _appendInitTrack(Box targetMoov, Uint8List? source, int trackId) {
@@ -80,7 +86,12 @@ Uint8List muxFragment(
   final videoBoxes = parseBoxes(video, 0, video.length);
   final videoMoof = _find(videoBoxes, 'moof');
   final videoMdat = _find(videoBoxes, 'mdat');
-  if (videoMoof == null || videoMdat == null) return video;
+  if (videoBoxes.any((box) => box.type == 'moov')) {
+    throw const FormatException('Media fragment unexpectedly contains moov');
+  }
+  if (videoMoof == null || videoMdat == null) {
+    throw const FormatException('Media fragment is missing moof or mdat');
+  }
 
   final videoTrafs = videoMoof.children
       .where((box) => box.type == 'traf')
