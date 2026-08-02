@@ -747,6 +747,19 @@ class PlaybackController extends ChangeNotifier {
     _logSubscription = player.stream.log.listen((log) {
       final isRoutineLog =
           log.level == 'info' || log.level == 'v' || log.level == 'debug';
+      // fMP4 HLS spam: origins that prepend the same EXT-X-MAP init section to
+      // every segment make ffmpeg's mov demuxer warn once per segment while it
+      // safely skips the duplicate moov, plus a "corrupted TRUN atom" line at
+      // each segment-boundary EOF. Both are harmless, but at one line per
+      // segment they flood the console and the debug UI. Note the `msg-level`
+      // option set in _applyPlaybackOptions cannot drop these here: it only
+      // filters mpv's own terminal output, while media_kit receives log
+      // messages through the client API at the global `logLevel`, which has no
+      // per-module filter — so they must be dropped in this listener.
+      final isBenignFmp4Warning =
+          log.prefix == 'ffmpeg/demuxer' &&
+          (log.text.contains('Found duplicated MOOV Atom') ||
+              log.text.contains('corrupted TRUN atom'));
       final level = switch (log.level) {
         'error' || 'fatal' => DebugLogLevel.error,
         'warn' => DebugLogLevel.warn,
@@ -755,7 +768,7 @@ class PlaybackController extends ChangeNotifier {
       // mpv runs at info so AV3A can be detected below, but forwarding its
       // high-frequency routine output to debugPrint builds a large throttled
       // console queue during long playback. Only retain actionable messages.
-      if (!isRoutineLog) {
+      if (!isRoutineLog && !isBenignFmp4Warning) {
         debugPrint('[mpv:${log.level}] ${log.prefix}: ${log.text}');
         DebugLogService.instance.add(
           '${log.prefix}: ${log.text}',
@@ -1873,6 +1886,16 @@ class PlaybackController extends ChangeNotifier {
       // formats so normal probing is unaffected when switching channels.
       'demuxer': (isHls || isAv3a || isMmtTlv) ? 'lavf' : '',
       'demuxer-lavf-format': isAv3a ? 'matroska' : (isMmtTlv ? 'mpegts' : ''),
+      // Some fMP4 HLS origins prepend the same EXT-X-MAP init section on
+      // playlist reloads. FFmpeg safely skips the duplicate moov but emits a
+      // warning for every segment. This only quiets mpv's own terminal
+      // channel; media_kit's client-API log stream ignores per-module
+      // msg-level, so the same warnings are also dropped in the log listener
+      // (see isBenignFmp4Warning). Keep info for AV3A detection and
+      // explicitly restore it when switching streams.
+      'msg-level': isHls && !isAv3a
+          ? 'ffmpeg/demuxer=error'
+          : 'ffmpeg/demuxer=info',
       // Deinterlacing is handled via an explicit video filter (see
       // _applyDeinterlaceFilter), applied after the option loop so the filter
       // string can be swapped live without a reload. Nothing to set here.

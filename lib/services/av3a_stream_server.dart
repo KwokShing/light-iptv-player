@@ -250,10 +250,21 @@ class Av3aStreamServer {
           .transform(utf8.decoder)
           .transform(const LineSplitter())
           .listen((line) {
-            if (line.trim().isNotEmpty) {
-              debugPrint('[av3a-ffmpeg] $line');
-              DebugLogService.instance.add(line, source: 'av3a-ffmpeg');
-            }
+            final trimmed = line.trim();
+            if (trimmed.isEmpty) return;
+            // fMP4 HLS spam: origins that prepend the same EXT-X-MAP init
+            // section to every segment make ffmpeg's mov demuxer warn once per
+            // segment while it safely skips the duplicate moov, plus a
+            // "corrupted TRUN atom" line at segment-boundary EOF. Both are
+            // harmless; at one line per segment they flood the console and the
+            // debug UI. (The playback controller filters the same warnings on
+            // mpv's log stream — this bridge FFmpeg logs to stderr directly.)
+            final isBenignFmp4Warning =
+                trimmed.contains('Found duplicated MOOV Atom') ||
+                trimmed.contains('corrupted TRUN atom');
+            if (isBenignFmp4Warning) return;
+            debugPrint('[av3a-ffmpeg] $line');
+            DebugLogService.instance.add(line, source: 'av3a-ffmpeg');
           });
       await response.addStream(process.stdout);
       final exitCode = await process.exitCode;
