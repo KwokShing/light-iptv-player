@@ -110,106 +110,213 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
 # === Override bundled mpv DLLs with KwokShing/mpv-builds ===
 # This Windows build includes FFmpeg's mmttlv demuxer, so MMT/TLV streams are
 # handled directly by libmpv without a separate converter.
-# Resolve the newest successful mpv-windows-x86_64 Actions artifact through the
-# GitHub API, download it from nightly.link, and verify the outer ZIP against
-# GitHub's SHA-256 digest. The artifact is a double ZIP: the outer archive holds
-# mpv-windows-x86_64.zip, whose mpv-win directory contains the runtime DLLs.
+# Prefer the mpv-windows-x86_64.zip asset from the latest GitHub Release. Only
+# when no published Release exists, or that Release has no matching Windows
+# asset, fall back to the newest non-expired Actions artifact via nightly.link.
+# Release assets are single ZIPs containing mpv-win; Actions downloads are
+# double ZIPs whose outer archive contains mpv-windows-x86_64.zip.
 # Extraction happens entirely in staging. The existing cache is replaced only
-# after mpv-win/libmpv-2.dll has been verified; network, metadata, digest, or
-# extraction failures retain the cached runtime. media_kit is the final fallback.
+# after SHA-256 and mpv-win/libmpv-2.dll have been verified; failures retain the
+# cached runtime. media_kit is the final fallback.
 set(KWOKSHING_MPV_CACHE "${CMAKE_BINARY_DIR}/kwokshing_mpv")
 set(KWOKSHING_MPV_RUNTIME "${KWOKSHING_MPV_CACHE}/mpv-win")
 set(CUSTOM_LIBMPV "${KWOKSHING_MPV_RUNTIME}/libmpv-2.dll")
-set(KWOKSHING_MPV_STAMP "${KWOKSHING_MPV_CACHE}/.artifact-id")
-set(KWOKSHING_MPV_API_JSON "${CMAKE_BINARY_DIR}/kwokshing-mpv-artifacts.json")
-set(KWOKSHING_MPV_API_URL
+set(KWOKSHING_MPV_STAMP "${KWOKSHING_MPV_CACHE}/.source-stamp")
+set(KWOKSHING_MPV_RELEASE_JSON "${CMAKE_BINARY_DIR}/kwokshing-mpv-release.json")
+set(KWOKSHING_MPV_ARTIFACTS_JSON "${CMAKE_BINARY_DIR}/kwokshing-mpv-artifacts.json")
+set(KWOKSHING_MPV_RELEASE_API_URL
+  "https://api.github.com/repos/KwokShing/mpv-builds/releases/latest")
+set(KWOKSHING_MPV_ARTIFACTS_API_URL
   "https://api.github.com/repos/KwokShing/mpv-builds/actions/artifacts?name=mpv-windows-x86_64&per_page=1")
-set(KWOKSHING_MPV_ARTIFACT_ID "")
-set(KWOKSHING_MPV_ARTIFACT_SHA256 "")
+set(KWOKSHING_MPV_SOURCE_KIND "")
+set(KWOKSHING_MPV_SOURCE_ID "")
+set(KWOKSHING_MPV_SOURCE_SHA256 "")
+set(KWOKSHING_MPV_SOURCE_URL "")
+set(KWOKSHING_MPV_SOURCE_DOUBLE_ZIP FALSE)
+set(KWOKSHING_MPV_RELEASE_ABSENT FALSE)
 
 if(NOT CMAKE_VERSION VERSION_LESS "3.19")
-  message(STATUS "Resolving the latest KwokShing/mpv-builds Windows artifact ...")
-  file(DOWNLOAD "${KWOKSHING_MPV_API_URL}" "${KWOKSHING_MPV_API_JSON}"
+  message(STATUS "Resolving the latest KwokShing/mpv-builds Release ...")
+  file(DOWNLOAD "${KWOKSHING_MPV_RELEASE_API_URL}" "${KWOKSHING_MPV_RELEASE_JSON}"
     HTTPHEADER "Accept: application/vnd.github+json"
     HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
-    TLS_VERIFY ON STATUS KWOKSHING_MPV_API_STATUS)
-  list(GET KWOKSHING_MPV_API_STATUS 0 KWOKSHING_MPV_API_CODE)
-  if(KWOKSHING_MPV_API_CODE EQUAL 0)
-    file(READ "${KWOKSHING_MPV_API_JSON}" KWOKSHING_MPV_API_RESPONSE)
-    string(JSON KWOKSHING_MPV_ARTIFACT_COUNT
-      ERROR_VARIABLE KWOKSHING_MPV_COUNT_ERROR
-      LENGTH "${KWOKSHING_MPV_API_RESPONSE}" artifacts)
-    if(KWOKSHING_MPV_COUNT_ERROR STREQUAL "NOTFOUND"
-        AND KWOKSHING_MPV_ARTIFACT_COUNT GREATER 0)
-      string(JSON KWOKSHING_MPV_ID ERROR_VARIABLE KWOKSHING_MPV_ID_ERROR
-        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 id)
-      string(JSON KWOKSHING_MPV_DIGEST ERROR_VARIABLE KWOKSHING_MPV_DIGEST_ERROR
-        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 digest)
-      string(JSON KWOKSHING_MPV_EXPIRED ERROR_VARIABLE KWOKSHING_MPV_EXPIRED_ERROR
-        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 expired)
-      if(KWOKSHING_MPV_ID_ERROR STREQUAL "NOTFOUND"
-          AND KWOKSHING_MPV_DIGEST_ERROR STREQUAL "NOTFOUND"
-          AND KWOKSHING_MPV_EXPIRED_ERROR STREQUAL "NOTFOUND")
-        if(KWOKSHING_MPV_EXPIRED)
-          message(WARNING "The latest KwokShing/mpv-builds artifact is expired; "
-            "retaining the cached mpv runtime.")
-        elseif(KWOKSHING_MPV_DIGEST MATCHES "^sha256:")
-          string(REGEX REPLACE "^sha256:" "" KWOKSHING_MPV_DIGEST_SHA256
-            "${KWOKSHING_MPV_DIGEST}")
-          string(LENGTH "${KWOKSHING_MPV_DIGEST_SHA256}" KWOKSHING_MPV_DIGEST_LENGTH)
-          if(KWOKSHING_MPV_DIGEST_LENGTH EQUAL 64
-              AND KWOKSHING_MPV_DIGEST_SHA256 MATCHES "^[0-9A-Fa-f]+$")
-            string(TOLOWER "${KWOKSHING_MPV_DIGEST_SHA256}"
-              KWOKSHING_MPV_ARTIFACT_SHA256)
-            set(KWOKSHING_MPV_ARTIFACT_ID "${KWOKSHING_MPV_ID}")
+    TLS_VERIFY ON STATUS KWOKSHING_MPV_RELEASE_STATUS
+    LOG KWOKSHING_MPV_RELEASE_LOG)
+  list(GET KWOKSHING_MPV_RELEASE_STATUS 0 KWOKSHING_MPV_RELEASE_CODE)
+  if(KWOKSHING_MPV_RELEASE_CODE EQUAL 0)
+    file(READ "${KWOKSHING_MPV_RELEASE_JSON}" KWOKSHING_MPV_RELEASE_RESPONSE)
+    string(JSON KWOKSHING_MPV_RELEASE_ASSET_COUNT
+      ERROR_VARIABLE KWOKSHING_MPV_RELEASE_ASSET_COUNT_ERROR
+      LENGTH "${KWOKSHING_MPV_RELEASE_RESPONSE}" assets)
+    if(KWOKSHING_MPV_RELEASE_ASSET_COUNT_ERROR STREQUAL "NOTFOUND")
+      set(KWOKSHING_MPV_RELEASE_ASSET_FOUND FALSE)
+      set(KWOKSHING_MPV_RELEASE_ASSET_INDEX 0)
+      while(KWOKSHING_MPV_RELEASE_ASSET_INDEX LESS KWOKSHING_MPV_RELEASE_ASSET_COUNT)
+        string(JSON KWOKSHING_MPV_RELEASE_ASSET_NAME
+          ERROR_VARIABLE KWOKSHING_MPV_RELEASE_ASSET_NAME_ERROR
+          GET "${KWOKSHING_MPV_RELEASE_RESPONSE}" assets
+            ${KWOKSHING_MPV_RELEASE_ASSET_INDEX} name)
+        if(KWOKSHING_MPV_RELEASE_ASSET_NAME_ERROR STREQUAL "NOTFOUND"
+            AND KWOKSHING_MPV_RELEASE_ASSET_NAME STREQUAL "mpv-windows-x86_64.zip")
+          set(KWOKSHING_MPV_RELEASE_ASSET_FOUND TRUE)
+          string(JSON KWOKSHING_MPV_RELEASE_ASSET_ID
+            ERROR_VARIABLE KWOKSHING_MPV_RELEASE_ASSET_ID_ERROR
+            GET "${KWOKSHING_MPV_RELEASE_RESPONSE}" assets
+              ${KWOKSHING_MPV_RELEASE_ASSET_INDEX} id)
+          string(JSON KWOKSHING_MPV_RELEASE_ASSET_URL
+            ERROR_VARIABLE KWOKSHING_MPV_RELEASE_ASSET_URL_ERROR
+            GET "${KWOKSHING_MPV_RELEASE_RESPONSE}" assets
+              ${KWOKSHING_MPV_RELEASE_ASSET_INDEX} browser_download_url)
+          string(JSON KWOKSHING_MPV_RELEASE_ASSET_DIGEST
+            ERROR_VARIABLE KWOKSHING_MPV_RELEASE_ASSET_DIGEST_ERROR
+            GET "${KWOKSHING_MPV_RELEASE_RESPONSE}" assets
+              ${KWOKSHING_MPV_RELEASE_ASSET_INDEX} digest)
+          if(KWOKSHING_MPV_RELEASE_ASSET_ID_ERROR STREQUAL "NOTFOUND"
+              AND KWOKSHING_MPV_RELEASE_ASSET_URL_ERROR STREQUAL "NOTFOUND"
+              AND KWOKSHING_MPV_RELEASE_ASSET_DIGEST_ERROR STREQUAL "NOTFOUND"
+              AND KWOKSHING_MPV_RELEASE_ASSET_DIGEST MATCHES "^sha256:")
+            string(REGEX REPLACE "^sha256:" "" KWOKSHING_MPV_RELEASE_SHA256
+              "${KWOKSHING_MPV_RELEASE_ASSET_DIGEST}")
+            string(LENGTH "${KWOKSHING_MPV_RELEASE_SHA256}"
+              KWOKSHING_MPV_RELEASE_SHA256_LENGTH)
+            if(KWOKSHING_MPV_RELEASE_SHA256_LENGTH EQUAL 64
+                AND KWOKSHING_MPV_RELEASE_SHA256 MATCHES "^[0-9A-Fa-f]+$")
+              string(TOLOWER "${KWOKSHING_MPV_RELEASE_SHA256}"
+                KWOKSHING_MPV_SOURCE_SHA256)
+              set(KWOKSHING_MPV_SOURCE_KIND "release")
+              set(KWOKSHING_MPV_SOURCE_ID "${KWOKSHING_MPV_RELEASE_ASSET_ID}")
+              set(KWOKSHING_MPV_SOURCE_URL "${KWOKSHING_MPV_RELEASE_ASSET_URL}")
+            else()
+              message(WARNING "The latest mpv Release asset has an invalid SHA-256; "
+                "retaining the cached mpv runtime.")
+            endif()
           else()
-            message(WARNING "GitHub returned an invalid SHA-256 digest for the "
-              "KwokShing/mpv-builds artifact; retaining the cached mpv runtime.")
+            message(WARNING "The latest mpv Release asset metadata is incomplete; "
+              "retaining the cached mpv runtime.")
+          endif()
+          break()
+        endif()
+        math(EXPR KWOKSHING_MPV_RELEASE_ASSET_INDEX
+          "${KWOKSHING_MPV_RELEASE_ASSET_INDEX} + 1")
+      endwhile()
+      if(NOT KWOKSHING_MPV_RELEASE_ASSET_FOUND)
+        set(KWOKSHING_MPV_RELEASE_ABSENT TRUE)
+        message(STATUS "The latest mpv Release has no Windows asset; "
+          "falling back to Actions artifacts.")
+      endif()
+    else()
+      message(WARNING "The latest mpv Release metadata could not be parsed; "
+        "retaining the cached mpv runtime.")
+    endif()
+  elseif("${KWOKSHING_MPV_RELEASE_LOG}" MATCHES "HTTP/[0-9.]+ 404"
+      OR "${KWOKSHING_MPV_RELEASE_LOG}" MATCHES "error: 404")
+    set(KWOKSHING_MPV_RELEASE_ABSENT TRUE)
+    message(STATUS "No published mpv Release exists; falling back to Actions artifacts.")
+  else()
+    list(GET KWOKSHING_MPV_RELEASE_STATUS 1 KWOKSHING_MPV_RELEASE_MESSAGE)
+    message(WARNING "Failed to query the latest KwokShing/mpv-builds Release "
+      "(${KWOKSHING_MPV_RELEASE_CODE}): ${KWOKSHING_MPV_RELEASE_MESSAGE}; "
+      "retaining the cached mpv runtime.")
+  endif()
+
+  if(KWOKSHING_MPV_RELEASE_ABSENT)
+    message(STATUS "Resolving the latest KwokShing/mpv-builds Windows artifact ...")
+    file(DOWNLOAD "${KWOKSHING_MPV_ARTIFACTS_API_URL}"
+      "${KWOKSHING_MPV_ARTIFACTS_JSON}"
+      HTTPHEADER "Accept: application/vnd.github+json"
+      HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
+      TLS_VERIFY ON STATUS KWOKSHING_MPV_ARTIFACTS_STATUS)
+    list(GET KWOKSHING_MPV_ARTIFACTS_STATUS 0 KWOKSHING_MPV_ARTIFACTS_CODE)
+    if(KWOKSHING_MPV_ARTIFACTS_CODE EQUAL 0)
+      file(READ "${KWOKSHING_MPV_ARTIFACTS_JSON}"
+        KWOKSHING_MPV_ARTIFACTS_RESPONSE)
+      string(JSON KWOKSHING_MPV_ARTIFACT_COUNT
+        ERROR_VARIABLE KWOKSHING_MPV_ARTIFACT_COUNT_ERROR
+        LENGTH "${KWOKSHING_MPV_ARTIFACTS_RESPONSE}" artifacts)
+      if(KWOKSHING_MPV_ARTIFACT_COUNT_ERROR STREQUAL "NOTFOUND"
+          AND KWOKSHING_MPV_ARTIFACT_COUNT GREATER 0)
+        string(JSON KWOKSHING_MPV_ARTIFACT_ID
+          ERROR_VARIABLE KWOKSHING_MPV_ARTIFACT_ID_ERROR
+          GET "${KWOKSHING_MPV_ARTIFACTS_RESPONSE}" artifacts 0 id)
+        string(JSON KWOKSHING_MPV_ARTIFACT_DIGEST
+          ERROR_VARIABLE KWOKSHING_MPV_ARTIFACT_DIGEST_ERROR
+          GET "${KWOKSHING_MPV_ARTIFACTS_RESPONSE}" artifacts 0 digest)
+        string(JSON KWOKSHING_MPV_ARTIFACT_EXPIRED
+          ERROR_VARIABLE KWOKSHING_MPV_ARTIFACT_EXPIRED_ERROR
+          GET "${KWOKSHING_MPV_ARTIFACTS_RESPONSE}" artifacts 0 expired)
+        if(KWOKSHING_MPV_ARTIFACT_ID_ERROR STREQUAL "NOTFOUND"
+            AND KWOKSHING_MPV_ARTIFACT_DIGEST_ERROR STREQUAL "NOTFOUND"
+            AND KWOKSHING_MPV_ARTIFACT_EXPIRED_ERROR STREQUAL "NOTFOUND")
+          if(KWOKSHING_MPV_ARTIFACT_EXPIRED)
+            message(WARNING "The latest KwokShing/mpv-builds artifact is expired; "
+              "retaining the cached mpv runtime.")
+          elseif(KWOKSHING_MPV_ARTIFACT_DIGEST MATCHES "^sha256:")
+            string(REGEX REPLACE "^sha256:" "" KWOKSHING_MPV_ARTIFACT_SHA256
+              "${KWOKSHING_MPV_ARTIFACT_DIGEST}")
+            string(LENGTH "${KWOKSHING_MPV_ARTIFACT_SHA256}"
+              KWOKSHING_MPV_ARTIFACT_SHA256_LENGTH)
+            if(KWOKSHING_MPV_ARTIFACT_SHA256_LENGTH EQUAL 64
+                AND KWOKSHING_MPV_ARTIFACT_SHA256 MATCHES "^[0-9A-Fa-f]+$")
+              string(TOLOWER "${KWOKSHING_MPV_ARTIFACT_SHA256}"
+                KWOKSHING_MPV_SOURCE_SHA256)
+              set(KWOKSHING_MPV_SOURCE_KIND "artifact")
+              set(KWOKSHING_MPV_SOURCE_ID "${KWOKSHING_MPV_ARTIFACT_ID}")
+              set(KWOKSHING_MPV_SOURCE_URL
+                "https://nightly.link/KwokShing/mpv-builds/actions/artifacts/${KWOKSHING_MPV_ARTIFACT_ID}.zip")
+              set(KWOKSHING_MPV_SOURCE_DOUBLE_ZIP TRUE)
+            else()
+              message(WARNING "GitHub returned an invalid artifact SHA-256; "
+                "retaining the cached mpv runtime.")
+            endif()
+          else()
+            message(WARNING "GitHub returned no artifact SHA-256; "
+              "retaining the cached mpv runtime.")
           endif()
         else()
-          message(WARNING "GitHub returned no SHA-256 digest for the "
-            "KwokShing/mpv-builds artifact; retaining the cached mpv runtime.")
+          message(WARNING "The KwokShing/mpv-builds artifact metadata is incomplete; "
+            "retaining the cached mpv runtime.")
         endif()
       else()
-        message(WARNING "The KwokShing/mpv-builds artifact metadata is incomplete; "
+        message(WARNING "No mpv-windows-x86_64 artifact was returned; "
           "retaining the cached mpv runtime.")
       endif()
     else()
-      message(WARNING "No mpv-windows-x86_64 artifact was returned; "
+      list(GET KWOKSHING_MPV_ARTIFACTS_STATUS 1
+        KWOKSHING_MPV_ARTIFACTS_MESSAGE)
+      message(WARNING "Failed to query KwokShing/mpv-builds artifacts "
+        "(${KWOKSHING_MPV_ARTIFACTS_CODE}): ${KWOKSHING_MPV_ARTIFACTS_MESSAGE}; "
         "retaining the cached mpv runtime.")
     endif()
-  else()
-    list(GET KWOKSHING_MPV_API_STATUS 1 KWOKSHING_MPV_API_MESSAGE)
-    message(WARNING "Failed to query KwokShing/mpv-builds artifacts "
-      "(${KWOKSHING_MPV_API_CODE}): ${KWOKSHING_MPV_API_MESSAGE}; "
-      "retaining the cached mpv runtime.")
   endif()
 else()
-  message(WARNING "CMake ${CMAKE_VERSION} cannot parse GitHub artifact metadata; "
+  message(WARNING "CMake ${CMAKE_VERSION} cannot parse GitHub source metadata; "
     "retaining the cached mpv runtime.")
 endif()
 
 set(KWOKSHING_MPV_CURRENT FALSE)
-if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL ""
-    AND EXISTS "${CUSTOM_LIBMPV}" AND EXISTS "${KWOKSHING_MPV_STAMP}")
-  file(READ "${KWOKSHING_MPV_STAMP}" KWOKSHING_MPV_PREVIOUS_ID)
-  string(STRIP "${KWOKSHING_MPV_PREVIOUS_ID}" KWOKSHING_MPV_PREVIOUS_ID)
-  if(KWOKSHING_MPV_PREVIOUS_ID STREQUAL "${KWOKSHING_MPV_ARTIFACT_ID}")
-    set(KWOKSHING_MPV_CURRENT TRUE)
-    message(STATUS "KwokShing mpv artifact ${KWOKSHING_MPV_ARTIFACT_ID} is cached.")
+if(NOT KWOKSHING_MPV_SOURCE_KIND STREQUAL "")
+  set(KWOKSHING_MPV_SOURCE_STAMP
+    "${KWOKSHING_MPV_SOURCE_KIND}:${KWOKSHING_MPV_SOURCE_ID}:${KWOKSHING_MPV_SOURCE_SHA256}")
+  if(EXISTS "${CUSTOM_LIBMPV}" AND EXISTS "${KWOKSHING_MPV_STAMP}")
+    file(READ "${KWOKSHING_MPV_STAMP}" KWOKSHING_MPV_PREVIOUS_STAMP)
+    string(STRIP "${KWOKSHING_MPV_PREVIOUS_STAMP}"
+      KWOKSHING_MPV_PREVIOUS_STAMP)
+    if(KWOKSHING_MPV_PREVIOUS_STAMP STREQUAL "${KWOKSHING_MPV_SOURCE_STAMP}")
+      set(KWOKSHING_MPV_CURRENT TRUE)
+      message(STATUS "KwokShing mpv ${KWOKSHING_MPV_SOURCE_KIND} "
+        "${KWOKSHING_MPV_SOURCE_ID} is cached.")
+    endif()
   endif()
 endif()
 
-if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
+if(NOT KWOKSHING_MPV_SOURCE_KIND STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
   set(KWOKSHING_MPV_ARCHIVE
-    "${CMAKE_BINARY_DIR}/mpv-windows-x86_64-${KWOKSHING_MPV_ARTIFACT_ID}.zip")
-  set(KWOKSHING_MPV_DOWNLOAD_URL
-    "https://nightly.link/KwokShing/mpv-builds/actions/artifacts/${KWOKSHING_MPV_ARTIFACT_ID}.zip")
+    "${CMAKE_BINARY_DIR}/mpv-windows-x86_64-${KWOKSHING_MPV_SOURCE_KIND}-${KWOKSHING_MPV_SOURCE_ID}.zip")
   set(KWOKSHING_MPV_DOWNLOAD_OK FALSE)
 
   if(EXISTS "${KWOKSHING_MPV_ARCHIVE}")
     file(SHA256 "${KWOKSHING_MPV_ARCHIVE}" KWOKSHING_MPV_CACHED_SHA256)
-    if(KWOKSHING_MPV_CACHED_SHA256 STREQUAL "${KWOKSHING_MPV_ARTIFACT_SHA256}")
+    if(KWOKSHING_MPV_CACHED_SHA256 STREQUAL "${KWOKSHING_MPV_SOURCE_SHA256}")
       set(KWOKSHING_MPV_DOWNLOAD_OK TRUE)
     else()
       file(REMOVE "${KWOKSHING_MPV_ARCHIVE}")
@@ -217,9 +324,10 @@ if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
   endif()
 
   if(NOT KWOKSHING_MPV_DOWNLOAD_OK)
-    message(STATUS "Downloading KwokShing mpv artifact ${KWOKSHING_MPV_ARTIFACT_ID} ...")
-    file(DOWNLOAD "${KWOKSHING_MPV_DOWNLOAD_URL}" "${KWOKSHING_MPV_ARCHIVE}"
-      EXPECTED_HASH SHA256=${KWOKSHING_MPV_ARTIFACT_SHA256}
+    message(STATUS "Downloading KwokShing mpv ${KWOKSHING_MPV_SOURCE_KIND} "
+      "${KWOKSHING_MPV_SOURCE_ID} ...")
+    file(DOWNLOAD "${KWOKSHING_MPV_SOURCE_URL}" "${KWOKSHING_MPV_ARCHIVE}"
+      EXPECTED_HASH SHA256=${KWOKSHING_MPV_SOURCE_SHA256}
       TLS_VERIFY ON SHOW_PROGRESS STATUS KWOKSHING_MPV_DOWNLOAD_STATUS)
     list(GET KWOKSHING_MPV_DOWNLOAD_STATUS 0 KWOKSHING_MPV_DOWNLOAD_CODE)
     if(KWOKSHING_MPV_DOWNLOAD_CODE EQUAL 0)
@@ -227,41 +335,49 @@ if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
     else()
       list(GET KWOKSHING_MPV_DOWNLOAD_STATUS 1 KWOKSHING_MPV_DOWNLOAD_MESSAGE)
       file(REMOVE "${KWOKSHING_MPV_ARCHIVE}")
-      message(WARNING "Failed to download or verify KwokShing mpv artifact: "
-        "${KWOKSHING_MPV_DOWNLOAD_MESSAGE}; retaining the cached mpv runtime.")
+      message(WARNING "Failed to download or verify the selected KwokShing mpv "
+        "${KWOKSHING_MPV_SOURCE_KIND}: ${KWOKSHING_MPV_DOWNLOAD_MESSAGE}; "
+        "retaining the cached mpv runtime.")
     endif()
   endif()
 
   if(KWOKSHING_MPV_DOWNLOAD_OK)
     set(KWOKSHING_MPV_STAGING
-      "${CMAKE_BINARY_DIR}/kwokshing-mpv-staging-${KWOKSHING_MPV_ARTIFACT_ID}")
+      "${CMAKE_BINARY_DIR}/kwokshing-mpv-staging-${KWOKSHING_MPV_SOURCE_KIND}-${KWOKSHING_MPV_SOURCE_ID}")
     set(KWOKSHING_MPV_STAGED_CACHE "${KWOKSHING_MPV_STAGING}/cache")
-    set(KWOKSHING_MPV_INNER_ARCHIVE
-      "${KWOKSHING_MPV_STAGING}/outer/mpv-windows-x86_64.zip")
     set(KWOKSHING_MPV_STAGED_LIBMPV
       "${KWOKSHING_MPV_STAGED_CACHE}/mpv-win/libmpv-2.dll")
     file(REMOVE_RECURSE "${KWOKSHING_MPV_STAGING}")
-    file(MAKE_DIRECTORY "${KWOKSHING_MPV_STAGING}/outer")
     file(MAKE_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}")
+    set(KWOKSHING_MPV_EXTRACT_RESULT 1)
 
-    execute_process(
-      COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_ARCHIVE}"
-      WORKING_DIRECTORY "${KWOKSHING_MPV_STAGING}/outer"
-      RESULT_VARIABLE KWOKSHING_MPV_OUTER_EXTRACT_RESULT)
-    if(KWOKSHING_MPV_OUTER_EXTRACT_RESULT EQUAL 0
-        AND EXISTS "${KWOKSHING_MPV_INNER_ARCHIVE}")
+    if(KWOKSHING_MPV_SOURCE_DOUBLE_ZIP)
+      set(KWOKSHING_MPV_OUTER_DIR "${KWOKSHING_MPV_STAGING}/outer")
+      set(KWOKSHING_MPV_INNER_ARCHIVE
+        "${KWOKSHING_MPV_OUTER_DIR}/mpv-windows-x86_64.zip")
+      file(MAKE_DIRECTORY "${KWOKSHING_MPV_OUTER_DIR}")
       execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_INNER_ARCHIVE}"
-        WORKING_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}"
-        RESULT_VARIABLE KWOKSHING_MPV_INNER_EXTRACT_RESULT)
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_ARCHIVE}"
+        WORKING_DIRECTORY "${KWOKSHING_MPV_OUTER_DIR}"
+        RESULT_VARIABLE KWOKSHING_MPV_OUTER_EXTRACT_RESULT)
+      if(KWOKSHING_MPV_OUTER_EXTRACT_RESULT EQUAL 0
+          AND EXISTS "${KWOKSHING_MPV_INNER_ARCHIVE}")
+        execute_process(
+          COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_INNER_ARCHIVE}"
+          WORKING_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}"
+          RESULT_VARIABLE KWOKSHING_MPV_EXTRACT_RESULT)
+      endif()
     else()
-      set(KWOKSHING_MPV_INNER_EXTRACT_RESULT 1)
+      execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_ARCHIVE}"
+        WORKING_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}"
+        RESULT_VARIABLE KWOKSHING_MPV_EXTRACT_RESULT)
     endif()
 
-    if(KWOKSHING_MPV_INNER_EXTRACT_RESULT EQUAL 0
+    if(KWOKSHING_MPV_EXTRACT_RESULT EQUAL 0
         AND EXISTS "${KWOKSHING_MPV_STAGED_LIBMPV}")
-      file(WRITE "${KWOKSHING_MPV_STAGED_CACHE}/.artifact-id"
-        "${KWOKSHING_MPV_ARTIFACT_ID}")
+      file(WRITE "${KWOKSHING_MPV_STAGED_CACHE}/.source-stamp"
+        "${KWOKSHING_MPV_SOURCE_STAMP}")
       set(KWOKSHING_MPV_BACKUP "${CMAKE_BINARY_DIR}/kwokshing_mpv_backup")
       file(REMOVE_RECURSE "${KWOKSHING_MPV_BACKUP}")
       set(KWOKSHING_MPV_CACHE_MOVED FALSE)
@@ -284,8 +400,8 @@ if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
           RESULT_VARIABLE KWOKSHING_MPV_ACTIVATE_RESULT)
         if(KWOKSHING_MPV_ACTIVATE_RESULT EQUAL 0)
           file(REMOVE_RECURSE "${KWOKSHING_MPV_BACKUP}")
-          message(STATUS "Activated KwokShing mpv artifact "
-            "${KWOKSHING_MPV_ARTIFACT_ID}.")
+          message(STATUS "Activated KwokShing mpv ${KWOKSHING_MPV_SOURCE_KIND} "
+            "${KWOKSHING_MPV_SOURCE_ID}.")
         elseif(KWOKSHING_MPV_CACHE_MOVED)
           execute_process(
             COMMAND "${CMAKE_COMMAND}" -E rename
@@ -301,7 +417,7 @@ if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
           "the existing cache was left unchanged.")
       endif()
     else()
-      message(WARNING "The nested KwokShing mpv artifact did not contain "
+      message(WARNING "The selected KwokShing mpv package did not contain "
         "mpv-win/libmpv-2.dll; retaining the cached mpv runtime.")
     endif()
     file(REMOVE_RECURSE "${KWOKSHING_MPV_STAGING}")
