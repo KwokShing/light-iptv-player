@@ -1602,12 +1602,17 @@ class PlaybackController extends ChangeNotifier {
       var replaced = false;
       if (platform != null) {
         try {
-          await (platform as dynamic).command([
+          final nativePlatform = platform as dynamic;
+          await nativePlatform.command([
             'loadfile',
             reloadUrl,
             'replace',
           ]);
-          await player.play();
+          // A raw loadfile bypasses media_kit's completed-state bookkeeping.
+          // Calling Player.play() here makes media_kit replay a completed item
+          // by seeking to zero, which fails for the non-seekable local DASH
+          // stream. Unpause mpv directly so no synthetic seek is issued.
+          await nativePlatform.setProperty('pause', 'no');
           replaced = true;
         } catch (e) {
           debugPrint('loadfile replace failed, falling back to open: $e');
