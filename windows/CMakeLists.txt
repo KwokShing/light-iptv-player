@@ -107,168 +107,219 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
 
-# === Override the bundled libmpv with a build from zhongfly/mpv-winbuild ===
-# media_kit_libs_windows_video ships an older (2023-09-24) libmpv-2.dll that
-# can't demux MPEG-DASH. Rather than committing a ~120 MB DLL to the repo, we
-# resolve the LATEST zhongfly/mpv-winbuild release at configure time via the
-# GitHub API, download its "mpv-dev-x86_64-*.7z" asset (SHA-256 verified using
-# the digest the API reports), extract libmpv-2.dll, and install it *after* the
-# plugin's bundled libraries above so the install step's final result is the
-# DASH-capable DLL. media_kit loads "libmpv-2.dll" by name at runtime and only
-# uses the standard mpv_* C API, so a drop-in replacement works without touching
-# the plugin itself.
-#
-# Trade-offs of tracking "latest":
-#   * Needs network + GitHub API at CMake *configure* time (i.e. on a fresh /
-#     cleaned build or whenever CMake re-runs -- not on every incremental build).
-#     Unauthenticated GitHub API allows 60 requests/hour/IP.
-#   * Builds are no longer perfectly reproducible. To pin a specific release,
-#     configure with -DLIBMPV_RELEASE_TAG=<tag> (e.g. 2026-07-07-4c220ffd95).
-#   * On any failure (offline, rate-limited, ...) we reuse a previously cached
-#     DLL, and only as a last resort fall back to media_kit's bundled build, so
-#     the build never hard-fails just because GitHub is unreachable.
+# === Override bundled mpv DLLs with KwokShing/mpv-builds ===
+# This Windows build includes FFmpeg's mmttlv demuxer, so MMT/TLV streams are
+# handled directly by libmpv without a separate converter.
+# Resolve the newest successful mpv-windows-x86_64 Actions artifact through the
+# GitHub API, download it from nightly.link, and verify the outer ZIP against
+# GitHub's SHA-256 digest. The artifact is a double ZIP: the outer archive holds
+# mpv-windows-x86_64.zip, whose mpv-win directory contains the runtime DLLs.
+# Extraction happens entirely in staging. The existing cache is replaced only
+# after mpv-win/libmpv-2.dll has been verified; network, metadata, digest, or
+# extraction failures retain the cached runtime. media_kit is the final fallback.
+set(KWOKSHING_MPV_CACHE "${CMAKE_BINARY_DIR}/kwokshing_mpv")
+set(KWOKSHING_MPV_RUNTIME "${KWOKSHING_MPV_CACHE}/mpv-win")
+set(CUSTOM_LIBMPV "${KWOKSHING_MPV_RUNTIME}/libmpv-2.dll")
+set(KWOKSHING_MPV_STAMP "${KWOKSHING_MPV_CACHE}/.artifact-id")
+set(KWOKSHING_MPV_API_JSON "${CMAKE_BINARY_DIR}/kwokshing-mpv-artifacts.json")
+set(KWOKSHING_MPV_API_URL
+  "https://api.github.com/repos/KwokShing/mpv-builds/actions/artifacts?name=mpv-windows-x86_64&per_page=1")
+set(KWOKSHING_MPV_ARTIFACT_ID "")
+set(KWOKSHING_MPV_ARTIFACT_SHA256 "")
 
-set(ZHONGFLY_MPV_SRC "${CMAKE_BINARY_DIR}/zhongfly_libmpv")
-set(CUSTOM_LIBMPV "${ZHONGFLY_MPV_SRC}/libmpv-2.dll")
-set(ZHONGFLY_MPV_STAMP "${ZHONGFLY_MPV_SRC}/.resolved-asset")
-
-# Optional pin: -DLIBMPV_RELEASE_TAG=<tag> targets that release instead of latest.
-if(DEFINED LIBMPV_RELEASE_TAG AND NOT LIBMPV_RELEASE_TAG STREQUAL "")
-  set(ZHONGFLY_MPV_API_URL
-    "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/tags/${LIBMPV_RELEASE_TAG}")
-else()
-  set(ZHONGFLY_MPV_API_URL
-    "https://api.github.com/repos/zhongfly/mpv-winbuild/releases/latest")
-endif()
-
-set(ZHONGFLY_MPV_ASSET_NAME "")
-set(ZHONGFLY_MPV_ASSET_URL "")
-set(ZHONGFLY_MPV_ASSET_SHA256 "")
-
-# --- Resolve the newest mpv-dev-x86_64 (non-v3, non-lgpl) asset via GitHub API.
 if(NOT CMAKE_VERSION VERSION_LESS "3.19")
-  set(ZHONGFLY_MPV_API_JSON "${CMAKE_BINARY_DIR}/zhongfly_release.json")
-  message(STATUS "Resolving zhongfly libmpv release from ${ZHONGFLY_MPV_API_URL} ...")
-  file(DOWNLOAD "${ZHONGFLY_MPV_API_URL}" "${ZHONGFLY_MPV_API_JSON}"
+  message(STATUS "Resolving the latest KwokShing/mpv-builds Windows artifact ...")
+  file(DOWNLOAD "${KWOKSHING_MPV_API_URL}" "${KWOKSHING_MPV_API_JSON}"
     HTTPHEADER "Accept: application/vnd.github+json"
     HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
-    STATUS ZHONGFLY_MPV_API_STATUS)
-  list(GET ZHONGFLY_MPV_API_STATUS 0 ZHONGFLY_MPV_API_CODE)
-  if(ZHONGFLY_MPV_API_CODE EQUAL 0)
-    file(READ "${ZHONGFLY_MPV_API_JSON}" ZHONGFLY_MPV_JSON)
-    string(JSON ZHONGFLY_MPV_ASSET_COUNT ERROR_VARIABLE ZHONGFLY_MPV_JSON_ERR
-      LENGTH "${ZHONGFLY_MPV_JSON}" assets)
-    if(ZHONGFLY_MPV_JSON_ERR STREQUAL "NOTFOUND" AND ZHONGFLY_MPV_ASSET_COUNT GREATER 0)
-      math(EXPR ZHONGFLY_MPV_LAST "${ZHONGFLY_MPV_ASSET_COUNT} - 1")
-      foreach(i RANGE ${ZHONGFLY_MPV_LAST})
-        string(JSON ZHONGFLY_MPV_NAME GET "${ZHONGFLY_MPV_JSON}" assets ${i} name)
-        # Match e.g. mpv-dev-x86_64-20260707-git-4c220ffd95.7z. Requiring a digit
-        # right after the arch excludes the "-v3-" and "-lgpl-" variants.
-        if(ZHONGFLY_MPV_NAME MATCHES "^mpv-dev-x86_64-[0-9].*\\.7z$")
-          set(ZHONGFLY_MPV_ASSET_NAME "${ZHONGFLY_MPV_NAME}")
-          string(JSON ZHONGFLY_MPV_ASSET_URL
-            GET "${ZHONGFLY_MPV_JSON}" assets ${i} browser_download_url)
-          string(JSON ZHONGFLY_MPV_DIGEST ERROR_VARIABLE ZHONGFLY_MPV_DIGEST_ERR
-            GET "${ZHONGFLY_MPV_JSON}" assets ${i} digest)
-          if(ZHONGFLY_MPV_DIGEST_ERR STREQUAL "NOTFOUND"
-              AND ZHONGFLY_MPV_DIGEST MATCHES "^sha256:")
-            string(REGEX REPLACE "^sha256:" "" ZHONGFLY_MPV_ASSET_SHA256
-              "${ZHONGFLY_MPV_DIGEST}")
+    TLS_VERIFY ON STATUS KWOKSHING_MPV_API_STATUS)
+  list(GET KWOKSHING_MPV_API_STATUS 0 KWOKSHING_MPV_API_CODE)
+  if(KWOKSHING_MPV_API_CODE EQUAL 0)
+    file(READ "${KWOKSHING_MPV_API_JSON}" KWOKSHING_MPV_API_RESPONSE)
+    string(JSON KWOKSHING_MPV_ARTIFACT_COUNT
+      ERROR_VARIABLE KWOKSHING_MPV_COUNT_ERROR
+      LENGTH "${KWOKSHING_MPV_API_RESPONSE}" artifacts)
+    if(KWOKSHING_MPV_COUNT_ERROR STREQUAL "NOTFOUND"
+        AND KWOKSHING_MPV_ARTIFACT_COUNT GREATER 0)
+      string(JSON KWOKSHING_MPV_ID ERROR_VARIABLE KWOKSHING_MPV_ID_ERROR
+        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 id)
+      string(JSON KWOKSHING_MPV_DIGEST ERROR_VARIABLE KWOKSHING_MPV_DIGEST_ERROR
+        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 digest)
+      string(JSON KWOKSHING_MPV_EXPIRED ERROR_VARIABLE KWOKSHING_MPV_EXPIRED_ERROR
+        GET "${KWOKSHING_MPV_API_RESPONSE}" artifacts 0 expired)
+      if(KWOKSHING_MPV_ID_ERROR STREQUAL "NOTFOUND"
+          AND KWOKSHING_MPV_DIGEST_ERROR STREQUAL "NOTFOUND"
+          AND KWOKSHING_MPV_EXPIRED_ERROR STREQUAL "NOTFOUND")
+        if(KWOKSHING_MPV_EXPIRED)
+          message(WARNING "The latest KwokShing/mpv-builds artifact is expired; "
+            "retaining the cached mpv runtime.")
+        elseif(KWOKSHING_MPV_DIGEST MATCHES "^sha256:")
+          string(REGEX REPLACE "^sha256:" "" KWOKSHING_MPV_DIGEST_SHA256
+            "${KWOKSHING_MPV_DIGEST}")
+          string(LENGTH "${KWOKSHING_MPV_DIGEST_SHA256}" KWOKSHING_MPV_DIGEST_LENGTH)
+          if(KWOKSHING_MPV_DIGEST_LENGTH EQUAL 64
+              AND KWOKSHING_MPV_DIGEST_SHA256 MATCHES "^[0-9A-Fa-f]+$")
+            string(TOLOWER "${KWOKSHING_MPV_DIGEST_SHA256}"
+              KWOKSHING_MPV_ARTIFACT_SHA256)
+            set(KWOKSHING_MPV_ARTIFACT_ID "${KWOKSHING_MPV_ID}")
+          else()
+            message(WARNING "GitHub returned an invalid SHA-256 digest for the "
+              "KwokShing/mpv-builds artifact; retaining the cached mpv runtime.")
           endif()
-          break()
+        else()
+          message(WARNING "GitHub returned no SHA-256 digest for the "
+            "KwokShing/mpv-builds artifact; retaining the cached mpv runtime.")
         endif()
-      endforeach()
-    endif()
-    if(ZHONGFLY_MPV_ASSET_NAME STREQUAL "")
-      message(WARNING "Could not find an mpv-dev-x86_64 asset in the GitHub API response.")
+      else()
+        message(WARNING "The KwokShing/mpv-builds artifact metadata is incomplete; "
+          "retaining the cached mpv runtime.")
+      endif()
+    else()
+      message(WARNING "No mpv-windows-x86_64 artifact was returned; "
+        "retaining the cached mpv runtime.")
     endif()
   else()
-    list(GET ZHONGFLY_MPV_API_STATUS 1 ZHONGFLY_MPV_API_MSG)
-    message(WARNING "Failed to query GitHub API for libmpv release "
-      "(${ZHONGFLY_MPV_API_CODE}): ${ZHONGFLY_MPV_API_MSG}")
+    list(GET KWOKSHING_MPV_API_STATUS 1 KWOKSHING_MPV_API_MESSAGE)
+    message(WARNING "Failed to query KwokShing/mpv-builds artifacts "
+      "(${KWOKSHING_MPV_API_CODE}): ${KWOKSHING_MPV_API_MESSAGE}; "
+      "retaining the cached mpv runtime.")
   endif()
 else()
-  message(WARNING "CMake ${CMAKE_VERSION} < 3.19 cannot parse JSON; "
-    "skipping automatic libmpv resolution.")
+  message(WARNING "CMake ${CMAKE_VERSION} cannot parse GitHub artifact metadata; "
+    "retaining the cached mpv runtime.")
 endif()
 
-# --- Download + extract the resolved asset (skipped if already current).
-if(NOT ZHONGFLY_MPV_ASSET_NAME STREQUAL "")
-  set(ZHONGFLY_MPV_ARCHIVE "${CMAKE_BINARY_DIR}/${ZHONGFLY_MPV_ASSET_NAME}")
+set(KWOKSHING_MPV_CURRENT FALSE)
+if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL ""
+    AND EXISTS "${CUSTOM_LIBMPV}" AND EXISTS "${KWOKSHING_MPV_STAMP}")
+  file(READ "${KWOKSHING_MPV_STAMP}" KWOKSHING_MPV_PREVIOUS_ID)
+  string(STRIP "${KWOKSHING_MPV_PREVIOUS_ID}" KWOKSHING_MPV_PREVIOUS_ID)
+  if(KWOKSHING_MPV_PREVIOUS_ID STREQUAL "${KWOKSHING_MPV_ARTIFACT_ID}")
+    set(KWOKSHING_MPV_CURRENT TRUE)
+    message(STATUS "KwokShing mpv artifact ${KWOKSHING_MPV_ARTIFACT_ID} is cached.")
+  endif()
+endif()
 
-  # Do we already have this exact asset extracted?
-  set(ZHONGFLY_MPV_CURRENT FALSE)
-  if(EXISTS "${CUSTOM_LIBMPV}" AND EXISTS "${ZHONGFLY_MPV_STAMP}")
-    file(READ "${ZHONGFLY_MPV_STAMP}" ZHONGFLY_MPV_PREV)
-    string(STRIP "${ZHONGFLY_MPV_PREV}" ZHONGFLY_MPV_PREV)
-    if(ZHONGFLY_MPV_PREV STREQUAL "${ZHONGFLY_MPV_ASSET_NAME}")
-      set(ZHONGFLY_MPV_CURRENT TRUE)
+if(NOT KWOKSHING_MPV_ARTIFACT_ID STREQUAL "" AND NOT KWOKSHING_MPV_CURRENT)
+  set(KWOKSHING_MPV_ARCHIVE
+    "${CMAKE_BINARY_DIR}/mpv-windows-x86_64-${KWOKSHING_MPV_ARTIFACT_ID}.zip")
+  set(KWOKSHING_MPV_DOWNLOAD_URL
+    "https://nightly.link/KwokShing/mpv-builds/actions/artifacts/${KWOKSHING_MPV_ARTIFACT_ID}.zip")
+  set(KWOKSHING_MPV_DOWNLOAD_OK FALSE)
+
+  if(EXISTS "${KWOKSHING_MPV_ARCHIVE}")
+    file(SHA256 "${KWOKSHING_MPV_ARCHIVE}" KWOKSHING_MPV_CACHED_SHA256)
+    if(KWOKSHING_MPV_CACHED_SHA256 STREQUAL "${KWOKSHING_MPV_ARTIFACT_SHA256}")
+      set(KWOKSHING_MPV_DOWNLOAD_OK TRUE)
+    else()
+      file(REMOVE "${KWOKSHING_MPV_ARCHIVE}")
     endif()
   endif()
 
-  if(ZHONGFLY_MPV_CURRENT)
-    message(STATUS "zhongfly libmpv ${ZHONGFLY_MPV_ASSET_NAME} already up to date.")
-  else()
-    # New version -> drop any previous extraction.
-    file(REMOVE_RECURSE "${ZHONGFLY_MPV_SRC}")
-    file(MAKE_DIRECTORY "${ZHONGFLY_MPV_SRC}")
-
-    # (Re)download unless a cached archive already matches the expected hash.
-    set(ZHONGFLY_MPV_NEED_DL TRUE)
-    if(EXISTS "${ZHONGFLY_MPV_ARCHIVE}" AND NOT ZHONGFLY_MPV_ASSET_SHA256 STREQUAL "")
-      file(SHA256 "${ZHONGFLY_MPV_ARCHIVE}" ZHONGFLY_MPV_HAVE_SHA)
-      if(ZHONGFLY_MPV_HAVE_SHA STREQUAL "${ZHONGFLY_MPV_ASSET_SHA256}")
-        set(ZHONGFLY_MPV_NEED_DL FALSE)
-      endif()
+  if(NOT KWOKSHING_MPV_DOWNLOAD_OK)
+    message(STATUS "Downloading KwokShing mpv artifact ${KWOKSHING_MPV_ARTIFACT_ID} ...")
+    file(DOWNLOAD "${KWOKSHING_MPV_DOWNLOAD_URL}" "${KWOKSHING_MPV_ARCHIVE}"
+      EXPECTED_HASH SHA256=${KWOKSHING_MPV_ARTIFACT_SHA256}
+      TLS_VERIFY ON SHOW_PROGRESS STATUS KWOKSHING_MPV_DOWNLOAD_STATUS)
+    list(GET KWOKSHING_MPV_DOWNLOAD_STATUS 0 KWOKSHING_MPV_DOWNLOAD_CODE)
+    if(KWOKSHING_MPV_DOWNLOAD_CODE EQUAL 0)
+      set(KWOKSHING_MPV_DOWNLOAD_OK TRUE)
+    else()
+      list(GET KWOKSHING_MPV_DOWNLOAD_STATUS 1 KWOKSHING_MPV_DOWNLOAD_MESSAGE)
+      file(REMOVE "${KWOKSHING_MPV_ARCHIVE}")
+      message(WARNING "Failed to download or verify KwokShing mpv artifact: "
+        "${KWOKSHING_MPV_DOWNLOAD_MESSAGE}; retaining the cached mpv runtime.")
     endif()
+  endif()
 
-    if(ZHONGFLY_MPV_NEED_DL)
-      message(STATUS "Downloading ${ZHONGFLY_MPV_ASSET_NAME} ...")
-      if(NOT ZHONGFLY_MPV_ASSET_SHA256 STREQUAL "")
-        file(DOWNLOAD "${ZHONGFLY_MPV_ASSET_URL}" "${ZHONGFLY_MPV_ARCHIVE}"
-          EXPECTED_HASH SHA256=${ZHONGFLY_MPV_ASSET_SHA256}
-          SHOW_PROGRESS STATUS ZHONGFLY_MPV_DL_STATUS)
-      else()
-        message(WARNING "GitHub API provided no SHA-256 digest; "
-          "downloading ${ZHONGFLY_MPV_ASSET_NAME} without hash verification.")
-        file(DOWNLOAD "${ZHONGFLY_MPV_ASSET_URL}" "${ZHONGFLY_MPV_ARCHIVE}"
-          SHOW_PROGRESS STATUS ZHONGFLY_MPV_DL_STATUS)
-      endif()
-      list(GET ZHONGFLY_MPV_DL_STATUS 0 ZHONGFLY_MPV_DL_CODE)
-      if(NOT ZHONGFLY_MPV_DL_CODE EQUAL 0)
-        list(GET ZHONGFLY_MPV_DL_STATUS 1 ZHONGFLY_MPV_DL_MSG)
-        file(REMOVE "${ZHONGFLY_MPV_ARCHIVE}")
-        message(WARNING "Failed to download ${ZHONGFLY_MPV_ASSET_NAME} "
-          "(${ZHONGFLY_MPV_DL_CODE}): ${ZHONGFLY_MPV_DL_MSG}")
-      endif()
-    endif()
+  if(KWOKSHING_MPV_DOWNLOAD_OK)
+    set(KWOKSHING_MPV_STAGING
+      "${CMAKE_BINARY_DIR}/kwokshing-mpv-staging-${KWOKSHING_MPV_ARTIFACT_ID}")
+    set(KWOKSHING_MPV_STAGED_CACHE "${KWOKSHING_MPV_STAGING}/cache")
+    set(KWOKSHING_MPV_INNER_ARCHIVE
+      "${KWOKSHING_MPV_STAGING}/outer/mpv-windows-x86_64.zip")
+    set(KWOKSHING_MPV_STAGED_LIBMPV
+      "${KWOKSHING_MPV_STAGED_CACHE}/mpv-win/libmpv-2.dll")
+    file(REMOVE_RECURSE "${KWOKSHING_MPV_STAGING}")
+    file(MAKE_DIRECTORY "${KWOKSHING_MPV_STAGING}/outer")
+    file(MAKE_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}")
 
-    # Extract libmpv-2.dll (CMake's bundled libarchive reads .7z). The DLL lives
-    # at the archive root; extra headers/import lib are harmless and ignored.
-    if(EXISTS "${ZHONGFLY_MPV_ARCHIVE}")
-      message(STATUS "Extracting ${ZHONGFLY_MPV_ASSET_NAME} ...")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_ARCHIVE}"
+      WORKING_DIRECTORY "${KWOKSHING_MPV_STAGING}/outer"
+      RESULT_VARIABLE KWOKSHING_MPV_OUTER_EXTRACT_RESULT)
+    if(KWOKSHING_MPV_OUTER_EXTRACT_RESULT EQUAL 0
+        AND EXISTS "${KWOKSHING_MPV_INNER_ARCHIVE}")
       execute_process(
-        COMMAND "${CMAKE_COMMAND}" -E tar xf "${ZHONGFLY_MPV_ARCHIVE}"
-        WORKING_DIRECTORY "${ZHONGFLY_MPV_SRC}"
-        RESULT_VARIABLE ZHONGFLY_MPV_EXTRACT_RESULT)
-      if(ZHONGFLY_MPV_EXTRACT_RESULT EQUAL 0 AND EXISTS "${CUSTOM_LIBMPV}")
-        file(WRITE "${ZHONGFLY_MPV_STAMP}" "${ZHONGFLY_MPV_ASSET_NAME}")
-      else()
-        message(WARNING "Failed to extract libmpv-2.dll from ${ZHONGFLY_MPV_ASSET_NAME}.")
-      endif()
+        COMMAND "${CMAKE_COMMAND}" -E tar xf "${KWOKSHING_MPV_INNER_ARCHIVE}"
+        WORKING_DIRECTORY "${KWOKSHING_MPV_STAGED_CACHE}"
+        RESULT_VARIABLE KWOKSHING_MPV_INNER_EXTRACT_RESULT)
+    else()
+      set(KWOKSHING_MPV_INNER_EXTRACT_RESULT 1)
     endif()
+
+    if(KWOKSHING_MPV_INNER_EXTRACT_RESULT EQUAL 0
+        AND EXISTS "${KWOKSHING_MPV_STAGED_LIBMPV}")
+      file(WRITE "${KWOKSHING_MPV_STAGED_CACHE}/.artifact-id"
+        "${KWOKSHING_MPV_ARTIFACT_ID}")
+      set(KWOKSHING_MPV_BACKUP "${CMAKE_BINARY_DIR}/kwokshing_mpv_backup")
+      file(REMOVE_RECURSE "${KWOKSHING_MPV_BACKUP}")
+      set(KWOKSHING_MPV_CACHE_MOVED FALSE)
+      if(EXISTS "${KWOKSHING_MPV_CACHE}")
+        execute_process(
+          COMMAND "${CMAKE_COMMAND}" -E rename
+            "${KWOKSHING_MPV_CACHE}" "${KWOKSHING_MPV_BACKUP}"
+          RESULT_VARIABLE KWOKSHING_MPV_BACKUP_RESULT)
+        if(KWOKSHING_MPV_BACKUP_RESULT EQUAL 0)
+          set(KWOKSHING_MPV_CACHE_MOVED TRUE)
+        endif()
+      else()
+        set(KWOKSHING_MPV_BACKUP_RESULT 0)
+      endif()
+
+      if(KWOKSHING_MPV_BACKUP_RESULT EQUAL 0)
+        execute_process(
+          COMMAND "${CMAKE_COMMAND}" -E rename
+            "${KWOKSHING_MPV_STAGED_CACHE}" "${KWOKSHING_MPV_CACHE}"
+          RESULT_VARIABLE KWOKSHING_MPV_ACTIVATE_RESULT)
+        if(KWOKSHING_MPV_ACTIVATE_RESULT EQUAL 0)
+          file(REMOVE_RECURSE "${KWOKSHING_MPV_BACKUP}")
+          message(STATUS "Activated KwokShing mpv artifact "
+            "${KWOKSHING_MPV_ARTIFACT_ID}.")
+        elseif(KWOKSHING_MPV_CACHE_MOVED)
+          execute_process(
+            COMMAND "${CMAKE_COMMAND}" -E rename
+              "${KWOKSHING_MPV_BACKUP}" "${KWOKSHING_MPV_CACHE}"
+            RESULT_VARIABLE KWOKSHING_MPV_RESTORE_RESULT)
+          message(WARNING "Failed to activate the staged mpv runtime; "
+            "restored the cached runtime.")
+        else()
+          message(WARNING "Failed to activate the staged mpv runtime.")
+        endif()
+      else()
+        message(WARNING "Could not preserve the cached mpv runtime for replacement; "
+          "the existing cache was left unchanged.")
+      endif()
+    else()
+      message(WARNING "The nested KwokShing mpv artifact did not contain "
+        "mpv-win/libmpv-2.dll; retaining the cached mpv runtime.")
+    endif()
+    file(REMOVE_RECURSE "${KWOKSHING_MPV_STAGING}")
   endif()
 endif()
 
-# --- Install the resolved DLL over media_kit's, or fall back with a warning.
+# This install rule follows PLUGIN_BUNDLED_LIBRARIES, so every DLL from mpv-win
+# is copied afterward and overrides any same-named DLL bundled by media_kit.
 if(EXISTS "${CUSTOM_LIBMPV}")
-  message(STATUS "Overriding bundled libmpv-2.dll with ${CUSTOM_LIBMPV}")
-  install(FILES "${CUSTOM_LIBMPV}"
+  file(GLOB KWOKSHING_MPV_DLLS LIST_DIRECTORIES FALSE
+    "${KWOKSHING_MPV_RUNTIME}/*.dll")
+  install(FILES ${KWOKSHING_MPV_DLLS}
     DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
+  message(STATUS "Using cached KwokShing mpv runtime from ${KWOKSHING_MPV_RUNTIME}.")
 else()
-  message(WARNING "No zhongfly libmpv-2.dll available; "
-    "using media_kit's bundled (non-DASH) build.")
+  message(WARNING "No verified KwokShing mpv runtime is cached; "
+    "using media_kit's bundled libmpv as the final fallback.")
 endif()
 
 # === AV3A (AVS3-P3 / Audio Vivid) decoder bridge (Windows x64) ===
@@ -322,104 +373,4 @@ if(ENABLE_AV3A_SUPPORT AND EXISTS "${AV3A_FFMPEG_EXE}")
     COMPONENT Runtime)
 else()
   message(WARNING "AV3A runtime unavailable; Audio Vivid streams will be silent.")
-endif()
-
-# === MMT/TLV to MPEG-TS converter (Windows x64) ===
-# FFmpeg/libmpv has no ARIB MMT/TLV demuxer. dantto4k's latest Windows CI
-# artifact supports already-descrambled HTTP streams; the v1.0.2-rc1 release
-# does not yet recognize --frontend-descrambled. Resolve the newest artifact
-# metadata from GitHub, download it through nightly.link (GitHub's artifact
-# endpoint requires authentication), and verify it against GitHub's SHA-256.
-set(DANTTO4K_DIR "${CMAKE_BINARY_DIR}/dantto4k")
-set(DANTTO4K_EXE "${DANTTO4K_DIR}/dantto4k.exe")
-set(DANTTO4K_STAMP "${DANTTO4K_DIR}/.artifact-id")
-set(DANTTO4K_LICENSE "${DANTTO4K_DIR}/LICENSE.txt")
-set(DANTTO4K_API_JSON "${CMAKE_BINARY_DIR}/dantto4k-artifacts.json")
-set(DANTTO4K_API_URL
-  "https://api.github.com/repos/nekohkr/dantto4k/actions/artifacts?name=dantto4k-main-windows-x64&per_page=1")
-set(DANTTO4K_ARTIFACT_ID "")
-set(DANTTO4K_ARTIFACT_SHA256 "")
-
-if(NOT CMAKE_VERSION VERSION_LESS "3.19")
-  file(DOWNLOAD "${DANTTO4K_API_URL}" "${DANTTO4K_API_JSON}"
-    HTTPHEADER "Accept: application/vnd.github+json"
-    HTTPHEADER "X-GitHub-Api-Version: 2022-11-28"
-    TLS_VERIFY ON STATUS DANTTO4K_API_STATUS)
-  list(GET DANTTO4K_API_STATUS 0 DANTTO4K_API_CODE)
-  if(DANTTO4K_API_CODE EQUAL 0)
-    file(READ "${DANTTO4K_API_JSON}" DANTTO4K_API_RESPONSE)
-    string(JSON DANTTO4K_ARTIFACT_COUNT ERROR_VARIABLE DANTTO4K_JSON_ERROR
-      LENGTH "${DANTTO4K_API_RESPONSE}" artifacts)
-    if(DANTTO4K_JSON_ERROR STREQUAL "NOTFOUND"
-        AND DANTTO4K_ARTIFACT_COUNT GREATER 0)
-      string(JSON DANTTO4K_ARTIFACT_ID
-        GET "${DANTTO4K_API_RESPONSE}" artifacts 0 id)
-      string(JSON DANTTO4K_ARTIFACT_DIGEST
-        GET "${DANTTO4K_API_RESPONSE}" artifacts 0 digest)
-      string(REGEX REPLACE "^sha256:" "" DANTTO4K_ARTIFACT_SHA256
-        "${DANTTO4K_ARTIFACT_DIGEST}")
-    endif()
-  else()
-    message(WARNING "Failed to resolve the latest dantto4k artifact.")
-  endif()
-endif()
-
-set(DANTTO4K_CURRENT FALSE)
-if(NOT DANTTO4K_ARTIFACT_ID STREQUAL ""
-    AND EXISTS "${DANTTO4K_EXE}" AND EXISTS "${DANTTO4K_STAMP}")
-  file(READ "${DANTTO4K_STAMP}" DANTTO4K_PREVIOUS_ID)
-  string(STRIP "${DANTTO4K_PREVIOUS_ID}" DANTTO4K_PREVIOUS_ID)
-  if(DANTTO4K_PREVIOUS_ID STREQUAL "${DANTTO4K_ARTIFACT_ID}")
-    set(DANTTO4K_CURRENT TRUE)
-  endif()
-endif()
-
-if(NOT DANTTO4K_ARTIFACT_ID STREQUAL "" AND NOT DANTTO4K_CURRENT)
-  set(DANTTO4K_ARCHIVE
-    "${CMAKE_BINARY_DIR}/dantto4k-${DANTTO4K_ARTIFACT_ID}.zip")
-  set(DANTTO4K_URL
-    "https://nightly.link/nekohkr/dantto4k/actions/artifacts/${DANTTO4K_ARTIFACT_ID}.zip")
-  file(DOWNLOAD "${DANTTO4K_URL}" "${DANTTO4K_ARCHIVE}"
-    EXPECTED_HASH SHA256=${DANTTO4K_ARTIFACT_SHA256}
-    TLS_VERIFY ON STATUS DANTTO4K_DOWNLOAD_STATUS)
-  list(GET DANTTO4K_DOWNLOAD_STATUS 0 DANTTO4K_DOWNLOAD_CODE)
-  if(DANTTO4K_DOWNLOAD_CODE EQUAL 0)
-    set(DANTTO4K_STAGING "${CMAKE_BINARY_DIR}/dantto4k-staging")
-    file(REMOVE_RECURSE "${DANTTO4K_STAGING}")
-    file(MAKE_DIRECTORY "${DANTTO4K_STAGING}")
-    execute_process(
-      COMMAND "${CMAKE_COMMAND}" -E tar xf "${DANTTO4K_ARCHIVE}"
-      WORKING_DIRECTORY "${DANTTO4K_STAGING}"
-      RESULT_VARIABLE DANTTO4K_EXTRACT_RESULT)
-    if(DANTTO4K_EXTRACT_RESULT EQUAL 0
-        AND EXISTS "${DANTTO4K_STAGING}/dantto4k.exe")
-      file(REMOVE_RECURSE "${DANTTO4K_DIR}")
-      file(RENAME "${DANTTO4K_STAGING}" "${DANTTO4K_DIR}")
-      file(WRITE "${DANTTO4K_STAMP}" "${DANTTO4K_ARTIFACT_ID}")
-    else()
-      message(WARNING "Failed to extract the dantto4k artifact.")
-    endif()
-  else()
-    message(WARNING "Failed to download the dantto4k artifact.")
-  endif()
-endif()
-
-if(EXISTS "${DANTTO4K_EXE}" AND NOT EXISTS "${DANTTO4K_LICENSE}")
-  file(DOWNLOAD
-    "https://raw.githubusercontent.com/nekohkr/dantto4k/main/LICENSE"
-    "${DANTTO4K_LICENSE}"
-    EXPECTED_HASH SHA256=c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
-    TLS_VERIFY ON STATUS DANTTO4K_LICENSE_STATUS)
-endif()
-
-if(EXISTS "${DANTTO4K_EXE}")
-  install(FILES "${DANTTO4K_EXE}"
-    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
-  if(EXISTS "${DANTTO4K_LICENSE}")
-    install(FILES "${DANTTO4K_LICENSE}"
-      DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/licenses/dantto4k"
-      COMPONENT Runtime)
-  endif()
-else()
-  message(WARNING "dantto4k.exe unavailable; MMT/TLV playback will be disabled.")
 endif()

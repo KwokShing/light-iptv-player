@@ -13,7 +13,7 @@ import '../dash/dash_stream_server.dart';
 import '../models/playlist.dart';
 import '../services/av3a_stream_server.dart';
 import '../services/debug_log_service.dart';
-import '../services/mmt_tlv_stream_server.dart';
+import '../services/mmt_tlv_utils.dart';
 import '../services/ping_service.dart';
 import '../services/proxy_service.dart';
 import '../services/user_agent_service.dart';
@@ -57,16 +57,12 @@ class PlaybackController extends ChangeNotifier {
   // mpv is pointed at its single muxed/decrypted local fMP4 stream instead of
   // the origin URL.
   final DashStreamServer _dashServer = DashStreamServer();
-  // dantto4k remuxes ARIB MMT/TLV into MPEG-TS because FFmpeg/libmpv does not
-  // provide an MMT/TLV demuxer. The loopback server keeps that native helper
-  // outside the mpv process and can restart it for reconnects.
   // AV3A (AVS3-P3 / Audio Vivid) is decoded by a dedicated FFmpeg build,
   // remuxed with the untouched video, and exposed as synchronized Matroska.
   final Av3aStreamServer _av3aServer = Av3aStreamServer();
-  final MmtTlvStreamServer _mmtTlvServer = MmtTlvStreamServer();
   // The URL actually handed to mpv for the current channel: the origin URL for
-  // plain streams, or a loopback proxy URL for ClearKey DASH, AV3A and MMT/TLV.
-  // Used by the reconnect path so it reloads the right source.
+  // plain and native MMT/TLV streams, or a loopback proxy URL for ClearKey DASH
+  // and AV3A. Used by the reconnect path so it reloads the right source.
   String _activeStreamUrl = '';
   // Retain format hints so reconnects re-apply the same lavf demuxer options.
   bool _activeIsHls = false;
@@ -235,7 +231,6 @@ class PlaybackController extends ChangeNotifier {
     streamUrlController.dispose();
     _dashServer.dispose();
     _av3aServer.dispose();
-    _mmtTlvServer.dispose();
     final activePlayer = _player;
     _player = null;
     _videoController = null;
@@ -1336,9 +1331,9 @@ class PlaybackController extends ChangeNotifier {
       await player.stop();
     }
     if (_disposed || request != playbackRequest) return;
-    // Stop any native converter left by the previous channel before preparing
-    // this one.
-    await Future.wait([_av3aServer.stop(), _mmtTlvServer.stop()]);
+    // Stop the AV3A converter left by the previous channel before preparing
+    // this one. MMT/TLV is decoded directly by the bundled libmpv.
+    await _av3aServer.stop();
     if (_disposed || request != playbackRequest) return;
 
     // ClearKey-protected MPEG-DASH: libmpv can't decrypt CENC, so route the
@@ -1422,23 +1417,10 @@ class PlaybackController extends ChangeNotifier {
     }
 
     if (isMmtTlv) {
-      try {
-        streamUrl = await _mmtTlvServer.start(streamUrl);
-        DebugLogService.instance.add(
-          'MMT/TLV converter started',
-          source: 'app',
-        );
-      } catch (error) {
-        DebugLogService.instance.add(
-          'MMT/TLV converter failed to start: $error',
-          level: DebugLogLevel.error,
-          source: 'app',
-        );
-        if (_disposed || request != playbackRequest) return;
-        _failureLabel = 'Load error';
-        notifyListeners();
-        return;
-      }
+      DebugLogService.instance.add(
+        'Using native libmpv MMT/TLV demuxer',
+        source: 'app',
+      );
     }
 
     if (isAv3a) {
@@ -1667,11 +1649,7 @@ class PlaybackController extends ChangeNotifier {
     _tlsFallbackStarting = false;
     _resetDashSubtitleFallback();
     _clearFreezeFrame();
-    await Future.wait([
-      _dashServer.stop(),
-      _av3aServer.stop(),
-      _mmtTlvServer.stop(),
-    ]);
+    await Future.wait([_dashServer.stop(), _av3aServer.stop()]);
     streamUrlController.clear();
     // Returning home releases libmpv without replacing it; the transport Stop
     // button keeps a blank engine because PlayerPage remains visible there.
@@ -1881,11 +1859,11 @@ class PlaybackController extends ChangeNotifier {
       // log with "youtube-dl failed: not found". Turn it off so a failed stream
       // fails fast and cleanly.
       'ytdl': 'no',
-      // Force FFmpeg's demuxer for HLS and for the local streams produced by
-      // the AV3A (Matroska) and MMT/TLV (MPEG-TS) converters. Cleared for other
-      // formats so normal probing is unaffected when switching channels.
+      // Force FFmpeg's demuxer for HLS, native MMT/TLV, and the local Matroska
+      // stream produced by the AV3A bridge. Cleared for other formats so normal
+      // probing is unaffected when switching channels.
       'demuxer': (isHls || isAv3a || isMmtTlv) ? 'lavf' : '',
-      'demuxer-lavf-format': isAv3a ? 'matroska' : (isMmtTlv ? 'mpegts' : ''),
+      'demuxer-lavf-format': isAv3a ? 'matroska' : (isMmtTlv ? 'mmttlv' : ''),
       // Some fMP4 HLS origins prepend the same EXT-X-MAP init section on
       // playlist reloads. FFmpeg safely skips the duplicate moov but emits a
       // warning for every segment. This only quiets mpv's own terminal
