@@ -96,7 +96,13 @@ class IptvApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider.value(value: proxyController),
         ChangeNotifierProvider.value(value: userAgentController),
-        ChangeNotifierProvider(create: (_) => SourcesController()..load()),
+        ChangeNotifierProvider(
+          create: (_) {
+            final controller = SourcesController();
+            unawaited(controller.load().then((_) => controller.refreshAll()));
+            return controller;
+          },
+        ),
         ChangeNotifierProvider(create: (_) => PlaybackController()),
         ChangeNotifierProvider(create: (_) => EpgController()..restore()),
         ChangeNotifierProvider(
