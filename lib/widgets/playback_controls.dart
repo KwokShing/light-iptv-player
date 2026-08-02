@@ -533,10 +533,6 @@ class _SubtitleButton extends StatelessWidget {
             onToggle?.call(!subtitlesEnabled);
             return;
           }
-          if (value == 'auto') {
-            onTrack?.call(SubtitleTrack.auto());
-            return;
-          }
           final index = int.tryParse(value.substring('track:'.length));
           if (index != null && index >= 0 && index < tracks.length) {
             onTrack?.call(tracks[index]);
@@ -553,12 +549,6 @@ class _SubtitleButton extends StatelessWidget {
             const PopupMenuItem<String>(
               enabled: false,
               child: Text('s10000_chi'),
-            ),
-          if (tracks.isNotEmpty)
-            CheckedPopupMenuItem<String>(
-              value: 'auto',
-              checked: subtitlesEnabled && selected.id == 'auto',
-              child: const Text('Auto (default)'),
             ),
           for (var index = 0; index < tracks.length; index++)
             CheckedPopupMenuItem<String>(
