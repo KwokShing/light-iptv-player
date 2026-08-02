@@ -30,6 +30,9 @@ class PlaybackController extends ChangeNotifier {
     final engine = _createPlaybackEngine();
     player = engine.$1;
     videoController = engine.$2;
+    _dashSubtitleSubscription = _dashServer.subtitleCues.listen(
+      _handleDashSubtitleCues,
+    );
     _listenPlaybackInfo();
   }
 
@@ -103,6 +106,13 @@ class PlaybackController extends ChangeNotifier {
   bool subtitlesEnabled = true;
   List<SubtitleTrack> subtitleTracks = const [];
   String? _pendingDefaultSubtitleId;
+
+  final List<DashSubtitleCue> _dashSubtitleCues = [];
+  final Set<String> _dashSubtitleCueKeys = {};
+  bool _dashTtmlFallbackActive = false;
+  Duration _rawPlaybackPosition = Duration.zero;
+  String dashSubtitleText = '';
+  StreamSubscription<List<DashSubtitleCue>>? _dashSubtitleSubscription;
 
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   StreamSubscription<Track>? _trackSubscription;
@@ -209,6 +219,8 @@ class PlaybackController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     unawaited(_cancelStreamSubscriptions());
+    unawaited(_dashSubtitleSubscription?.cancel());
+    _dashSubtitleSubscription = null;
     _bitrateTimer?.cancel();
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
@@ -404,6 +416,61 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
+  void _handleDashSubtitleCues(List<DashSubtitleCue> cues) {
+    if (_disposed) return;
+    if (cues.isEmpty) {
+      final changed = dashSubtitleText.isNotEmpty;
+      _dashSubtitleCues.clear();
+      _dashSubtitleCueKeys.clear();
+      _dashTtmlFallbackActive = false;
+      dashSubtitleText = '';
+      if (changed) notifyListeners();
+      return;
+    }
+
+    for (final cue in cues) {
+      final key =
+          '${cue.start.inMicroseconds}|${cue.end.inMicroseconds}|'
+          '${cue.text}';
+      if (_dashSubtitleCueKeys.add(key)) _dashSubtitleCues.add(cue);
+    }
+    _dashSubtitleCues.sort((a, b) => a.start.compareTo(b.start));
+    if (_dashSubtitleCues.length > 2000) {
+      final removed = _dashSubtitleCues.sublist(
+        0,
+        _dashSubtitleCues.length - 2000,
+      );
+      _dashSubtitleCues.removeRange(0, removed.length);
+      for (final cue in removed) {
+        _dashSubtitleCueKeys.remove(
+          '${cue.start.inMicroseconds}|${cue.end.inMicroseconds}|${cue.text}',
+        );
+      }
+    }
+    if (_updateDashSubtitleText(_rawPlaybackPosition)) notifyListeners();
+  }
+
+  void _resetDashSubtitleFallback() {
+    _dashSubtitleCues.clear();
+    _dashSubtitleCueKeys.clear();
+    _dashTtmlFallbackActive = false;
+    _rawPlaybackPosition = Duration.zero;
+    dashSubtitleText = '';
+  }
+
+  bool _updateDashSubtitleText(Duration at) {
+    final next = !_dashTtmlFallbackActive || !subtitlesEnabled
+        ? ''
+        : _dashSubtitleCues
+              .where((cue) => at >= cue.start && at < cue.end)
+              .map((cue) => cue.text)
+              .toSet()
+              .join('\n');
+    if (next == dashSubtitleText) return false;
+    dashSubtitleText = next;
+    return true;
+  }
+
   bool _refreshSubtitleTracks(Iterable<SubtitleTrack> tracks) {
     final next = tracks
         .where((track) {
@@ -429,10 +496,13 @@ class PlaybackController extends ChangeNotifier {
     return true;
   }
 
+  static const String subtitleFontFamily = 'Microsoft JhengHei';
+  static const double subtitleFontSizeAt720p = 56;
+
   Map<String, String> get _nativeSubtitleOptions => {
     'sub-visibility': subtitlesEnabled ? 'yes' : 'no',
-    'sub-font': 'Microsoft JhengHei',
-    'sub-font-size': '56',
+    'sub-font': subtitleFontFamily,
+    'sub-font-size': subtitleFontSizeAt720p.toString(),
     'sub-color': '#FFFFFFFF',
     'sub-back-color': '#00000000',
     'sub-border-color': '#FF303030',
@@ -615,13 +685,17 @@ class PlaybackController extends ChangeNotifier {
     });
     _positionSubscription = player.stream.position.listen((value) {
       if (_disposed || _seeking) return;
+      _rawPlaybackPosition = value;
+      final subtitleChanged = _updateDashSubtitleText(value);
       // A position past zero also proves real playback (covers audio-only
       // streams that emit no video params).
       if (!_everPlayed && value > Duration.zero) _confirmPlaybackStarted();
       // The progress UI only shows whole seconds, so ignore the sub-second
-      // firehose. This alone cuts page rebuilds during playback from many per
-      // second down to about one.
-      if (value.inSeconds == position.inSeconds) return;
+      // firehose unless a Flutter-rendered TTML cue changed.
+      if (value.inSeconds == position.inSeconds) {
+        if (subtitleChanged) notifyListeners();
+        return;
+      }
       position = value;
       notifyListeners();
     });
@@ -683,6 +757,20 @@ class PlaybackController extends ChangeNotifier {
       // means the bundled libmpv cannot decode it, so switch straight to the
       // AV3A-to-AAC bridge instead of playing on silently.
       final logText = log.text.toLowerCase();
+      final missingTtmlDecoder =
+          logText.contains('could not find subtitle decoder') &&
+          logText.contains('ttml');
+      if (!_dashTtmlFallbackActive &&
+          nowPlaying?.isEncryptedDash == true &&
+          missingTtmlDecoder) {
+        _dashTtmlFallbackActive = true;
+        final changed = _updateDashSubtitleText(_rawPlaybackPosition);
+        DebugLogService.instance.add(
+          'Native TTML decoder unavailable; using Flutter subtitle fallback',
+          source: 'app',
+        );
+        if (changed) notifyListeners();
+      }
       // mpv's curl network layer refuses HTTPS origins whose TLS certificate
       // can't be verified (self-signed/expired/untrusted CA), printing e.g.
       // "TLS certificate verification failed" / "SSL peer certificate ... was
@@ -1135,6 +1223,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> setSubtitlesEnabled(bool enabled) async {
     subtitlesEnabled = enabled;
     _pendingDefaultSubtitleId = null;
+    _updateDashSubtitleText(_rawPlaybackPosition);
     notifyListeners();
     if (!hasPlaybackEngine || nowPlaying == null) return;
     try {
@@ -1158,6 +1247,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> selectSubtitleTrack(SubtitleTrack track) async {
     subtitlesEnabled = true;
     _pendingDefaultSubtitleId = null;
+    _updateDashSubtitleText(_rawPlaybackPosition);
     notifyListeners();
     if (!hasPlaybackEngine || nowPlaying == null) return;
     try {
@@ -1215,6 +1305,7 @@ class PlaybackController extends ChangeNotifier {
     subtitlesEnabled = true;
     subtitleTracks = const [];
     _pendingDefaultSubtitleId = null;
+    _resetDashSubtitleFallback();
     position = Duration.zero;
     duration = Duration.zero;
     _seeking = false;
@@ -1558,6 +1649,7 @@ class PlaybackController extends ChangeNotifier {
     _audioDecodeErrorStreak = 0;
     _tlsVerifyDisabled = false;
     _tlsFallbackStarting = false;
+    _resetDashSubtitleFallback();
     _clearFreezeFrame();
     await Future.wait([
       _dashServer.stop(),
@@ -1612,12 +1704,16 @@ class PlaybackController extends ChangeNotifier {
     _seeking = true;
     _seekTarget = Duration(milliseconds: (seconds * 1000).round());
     position = _seekTarget;
+    _rawPlaybackPosition = _seekTarget;
+    _updateDashSubtitleText(_seekTarget);
     notifyListeners();
   }
 
   Future<void> onSeekEnd(double seconds) async {
     final target = Duration(milliseconds: (seconds * 1000).round());
     position = target;
+    _rawPlaybackPosition = target;
+    _updateDashSubtitleText(target);
     _seeking = false;
     notifyListeners();
     try {

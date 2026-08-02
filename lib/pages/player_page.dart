@@ -225,6 +225,92 @@ class _PlayerPageState extends State<PlayerPage> {
                                                 gaplessPlayback: true,
                                               ),
                                             ),
+                                          if (playback
+                                              .dashSubtitleText
+                                              .isNotEmpty)
+                                            Positioned.fill(
+                                              child: IgnorePointer(
+                                                child: LayoutBuilder(
+                                                  builder: (context, constraints) {
+                                                    final fontSize =
+                                                        PlaybackController
+                                                            .subtitleFontSizeAt720p *
+                                                        constraints.maxHeight /
+                                                        720;
+                                                    return Align(
+                                                      alignment: Alignment
+                                                          .bottomCenter,
+                                                      child: Padding(
+                                                        padding:
+                                                            EdgeInsets.fromLTRB(
+                                                              32,
+                                                              0,
+                                                              32,
+                                                              fullscreen
+                                                                  ? 54
+                                                                  : 24,
+                                                            ),
+                                                        child: Text(
+                                                          playback
+                                                              .dashSubtitleText,
+                                                          textAlign:
+                                                              TextAlign.center,
+                                                          style: TextStyle(
+                                                            color: Colors.white,
+                                                            fontFamily:
+                                                                PlaybackController
+                                                                    .subtitleFontFamily,
+                                                            fontSize: fontSize,
+                                                            height: 1.2,
+                                                            fontWeight:
+                                                                FontWeight
+                                                                    .normal,
+                                                            shadows: const [
+                                                              Shadow(
+                                                                color: Colors
+                                                                    .black,
+                                                                offset: Offset(
+                                                                  -1,
+                                                                  -1,
+                                                                ),
+                                                                blurRadius: 1,
+                                                              ),
+                                                              Shadow(
+                                                                color: Colors
+                                                                    .black,
+                                                                offset: Offset(
+                                                                  1,
+                                                                  -1,
+                                                                ),
+                                                                blurRadius: 1,
+                                                              ),
+                                                              Shadow(
+                                                                color: Colors
+                                                                    .black,
+                                                                offset: Offset(
+                                                                  -1,
+                                                                  1,
+                                                                ),
+                                                                blurRadius: 1,
+                                                              ),
+                                                              Shadow(
+                                                                color: Colors
+                                                                    .black,
+                                                                offset: Offset(
+                                                                  1,
+                                                                  1,
+                                                                ),
+                                                                blurRadius: 1,
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    );
+                                                  },
+                                                ),
+                                              ),
+                                            ),
                                           if (playback.reconnecting)
                                             const Positioned.fill(
                                               child: Center(

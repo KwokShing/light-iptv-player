@@ -21,6 +21,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:xml/xml.dart';
 
 import 'dash_c.dart';
 import 'dash_manifest.dart';
@@ -31,6 +32,20 @@ import 'mp4/cenc.dart';
 import 'mp4/fmp4_muxer.dart';
 import '../services/user_agent_service.dart';
 import 'representation.dart';
+
+/// A text cue extracted from an `stpp` (TTML-in-MP4) DASH subtitle fragment.
+/// Times are rebased to the local progressive stream handed to libmpv.
+class DashSubtitleCue {
+  const DashSubtitleCue({
+    required this.start,
+    required this.end,
+    required this.text,
+  });
+
+  final Duration start;
+  final Duration end;
+  final String text;
+}
 
 /// A selected track: its representation plus the resolved base URL used to
 /// resolve its segment URIs.
@@ -85,6 +100,11 @@ class DashStreamServer {
   // Guards against overlapping streaming sessions when mpv reconnects.
   int _sessionSeq = 0;
 
+  final StreamController<List<DashSubtitleCue>> _subtitleCueController =
+      StreamController<List<DashSubtitleCue>>.broadcast();
+  Stream<List<DashSubtitleCue>> get subtitleCues =>
+      _subtitleCueController.stream;
+
   // Preserve the tuned Android identity by default while allowing the global
   // setting to override it for every manifest and segment request.
   Map<String, String> get _originHeaders => {
@@ -123,6 +143,9 @@ class DashStreamServer {
 
   Future<void> stop() async {
     _sessionSeq++;
+    if (!_subtitleCueController.isClosed) {
+      _subtitleCueController.add(const <DashSubtitleCue>[]);
+    }
     final client = _client;
     _client = null;
     client?.close();
@@ -141,6 +164,7 @@ class DashStreamServer {
 
   void dispose() {
     unawaited(stop());
+    unawaited(_subtitleCueController.close());
   }
 
   Future<void> _handle(HttpRequest req) async {
@@ -194,6 +218,7 @@ class DashStreamServer {
 
     final video = _selectVideo(manifest);
     final audio = _selectAudio(manifest);
+    final subtitle = _selectSubtitle(manifest);
     _renditionsLogged = true;
     if (video == null) {
       debugPrint('dash: no video representation found');
@@ -202,7 +227,8 @@ class DashStreamServer {
     }
     debugPrint(
       'dash: selected video=${video.representation.format} '
-      'audio=${audio?.representation.format}',
+      'audio=${audio?.representation.format} '
+      'subtitle=${subtitle?.representation.format}',
     );
 
     req.response.statusCode = HttpStatus.ok;
@@ -214,14 +240,17 @@ class DashStreamServer {
     final inits = await Future.wait<Uint8List?>([
       _loadInit(video),
       if (audio != null) _loadInit(audio),
+      if (subtitle != null) _loadInit(subtitle),
     ]);
     final videoInitRaw = inits[0];
-    final audioInitRaw = audio != null && inits.length > 1 ? inits[1] : null;
+    var nextInit = 1;
+    final audioInitRaw = audio != null ? inits[nextInit++] : null;
+    final subtitleInitRaw = subtitle != null ? inits[nextInit] : null;
     if (videoInitRaw == null) {
       debugPrint('dash: failed to load video init');
       return;
     }
-    final mergedInit = muxInit(videoInitRaw, audioInitRaw);
+    final mergedInit = muxInit(videoInitRaw, audioInitRaw, subtitleInitRaw);
     if (session != _sessionSeq) return;
     req.response.add(mergedInit);
     await req.response.flush();
@@ -245,12 +274,31 @@ class DashStreamServer {
 
     var videoTrack = video;
     var audioTrack = audio;
+    var subtitleTrack = subtitleInitRaw == null ? null : subtitle;
+    int? subtitleTimelineOriginUs;
+    if (subtitleTrack != null) {
+      try {
+        final videoStartUs = video.index.getTimeUs(segmentNum);
+        final firstSubtitleSegment = subtitleTrack.index.getSegmentNum(
+          videoStartUs,
+          periodDurationUs,
+        );
+        subtitleTimelineOriginUs = subtitleTrack.index.getTimeUs(
+          firstSubtitleSegment,
+        );
+      } catch (error) {
+        debugPrint('dash: subtitle timeline origin failed: $error');
+      }
+    }
 
     // Ready-to-send fragments waiting to be written to mpv, and how many bytes
     // they hold. The producer appends; the consumer removes.
     final buffered = <Uint8List>[];
     var bufferedBytes = 0;
     var producerDone = false;
+    // A subtitle segment can span several video segments. Schedule each one
+    // only once or its decode time jumps backwards and libmpv drops the cues.
+    final scheduledSubtitleSegments = <String>{};
     // Completer the consumer awaits when the buffer is empty (more data coming).
     Completer<void>? dataReady;
     // Completer the producer awaits when the buffer is full (wait for drain).
@@ -277,7 +325,17 @@ class DashStreamServer {
         var n = segmentNum + pipeline.length;
         while (pipeline.length < _prefetchDepth && n <= upTo) {
           final seg = n;
-          pipeline[seg] = _loadMuxedFragment(videoTrack, audioTrack, seg, seg);
+          pipeline[seg] = _loadMuxedFragment(
+            videoTrack,
+            audioTrack,
+            subtitleTrack,
+            seg,
+            seg,
+            periodDurationUs,
+            scheduledSubtitleSegments,
+            session,
+            subtitleTimelineOriginUs,
+          );
           n++;
         }
       }
@@ -338,6 +396,7 @@ class DashStreamServer {
             // from wherever the refreshed timeline now reaches.
             edgeMisses++;
             pipeline.clear();
+            scheduledSubtitleSegments.clear();
             await Future<void>.delayed(
               Duration(milliseconds: edgeMisses <= 1 ? 500 : 1500),
             );
@@ -348,6 +407,7 @@ class DashStreamServer {
               periodDurationUs = manifest.getPeriodDurationUs(periodIndex);
               final newVideo = _selectVideo(manifest);
               final newAudio = _selectAudio(manifest);
+              final newSubtitle = _selectSubtitle(manifest);
               if (newVideo != null) {
                 newVideo.crypto = videoTrack.crypto;
                 videoTrack = newVideo;
@@ -356,6 +416,11 @@ class DashStreamServer {
               if (newAudio != null && currentAudio != null) {
                 newAudio.crypto = currentAudio.crypto;
                 audioTrack = newAudio;
+              }
+              final currentSubtitle = subtitleTrack;
+              if (newSubtitle != null && currentSubtitle != null) {
+                newSubtitle.crypto = currentSubtitle.crypto;
+                subtitleTrack = newSubtitle;
               }
               // If the segment we want still isn't in the refreshed timeline,
               // jump to the fresh manifest's live edge and resume there. This
@@ -440,27 +505,93 @@ class DashStreamServer {
     await Future.wait([producer, consume()]);
   }
 
-  // Downloads a video (and optional audio) segment concurrently, decrypts both,
-  // and muxes them into one fMP4 fragment stamped with [sequence]. The tiny
-  // audio segment is fetched alongside the video; cross-fragment concurrency is
-  // bounded by the prefetch pipeline. Returns null if the video segment is
-  // missing (e.g. beyond the live edge) or muxing fails.
+  // Downloads video, optional audio and optional fMP4 subtitle segments,
+  // decrypts them and muxes them into one fragment. Subtitle segment numbers
+  // are resolved from the video presentation time because DASH adaptation
+  // sets may use different start numbers or segment durations.
   Future<Uint8List?> _loadMuxedFragment(
     _SelectedTrack video,
     _SelectedTrack? audio,
+    _SelectedTrack? subtitle,
     int segmentNum,
     int sequence,
+    int periodDurationUs,
+    Set<String> scheduledSubtitleSegments,
+    int session,
+    int? subtitleTimelineOriginUs,
   ) async {
+    int? subtitleSegmentNum;
+    String? subtitleSegmentKey;
+    if (subtitle != null) {
+      try {
+        final presentationTimeUs = video.index.getTimeUs(segmentNum);
+        final candidate = subtitle.index.getSegmentNum(
+          presentationTimeUs,
+          periodDurationUs,
+        );
+        final key =
+            '${subtitle.baseUrl}|'
+            '${subtitle.representation.format.id}|$candidate';
+        if (scheduledSubtitleSegments.add(key)) {
+          subtitleSegmentNum = candidate;
+          subtitleSegmentKey = key;
+        }
+      } catch (error) {
+        debugPrint('dash: subtitle segment lookup failed: $error');
+      }
+    }
+
     final results = await Future.wait<Uint8List?>([
       _loadSegment(video, segmentNum),
       if (audio != null) _loadSegment(audio, segmentNum),
+      if (subtitle != null && subtitleSegmentNum != null)
+        _loadSegment(subtitle, subtitleSegmentNum),
     ]);
     final videoSeg = results[0];
-    final audioSeg = audio != null && results.length > 1 ? results[1] : null;
-    if (videoSeg == null) return null;
+    var nextResult = 1;
+    final audioSeg = audio != null ? results[nextResult++] : null;
+    final subtitleSeg = subtitle != null && subtitleSegmentNum != null
+        ? results[nextResult]
+        : null;
+    if (videoSeg == null ||
+        (subtitleSegmentKey != null && subtitleSeg == null)) {
+      if (subtitleSegmentKey != null) {
+        scheduledSubtitleSegments.remove(subtitleSegmentKey);
+      }
+      if (videoSeg == null) return null;
+    }
     try {
-      return muxFragment(videoSeg, audioSeg, sequence);
+      final muxed = muxFragment(videoSeg, audioSeg, sequence, subtitleSeg);
+      if (subtitle != null &&
+          subtitleSeg != null &&
+          subtitleSegmentNum != null &&
+          subtitleTimelineOriginUs != null &&
+          session == _sessionSeq &&
+          _isTtmlSubtitle(subtitle)) {
+        final segmentStartUs = subtitle.index.getTimeUs(subtitleSegmentNum);
+        final segmentDurationUs = subtitle.index.getDurationUs(
+          subtitleSegmentNum,
+          periodDurationUs,
+        );
+        final cues = _parseStppCues(
+          subtitleSeg,
+          segmentStartUs: segmentStartUs,
+          segmentDurationUs: segmentDurationUs,
+          timelineOriginUs: subtitleTimelineOriginUs,
+        );
+        if (cues.isNotEmpty && !_subtitleCueController.isClosed) {
+          debugPrint(
+            'dash: parsed ${cues.length} TTML cues from subtitle segment '
+            '$subtitleSegmentNum',
+          );
+          _subtitleCueController.add(cues);
+        }
+      }
+      return muxed;
     } catch (error) {
+      if (subtitleSegmentKey != null) {
+        scheduledSubtitleSegments.remove(subtitleSegmentKey);
+      }
       debugPrint('dash: mux failed at seg $segmentNum: $error');
       return null;
     }
@@ -476,18 +607,54 @@ class DashStreamServer {
   _SelectedTrack? _selectAudio(DashManifest manifest) =>
       _selectTrack(manifest, C.trackTypeAudio, lowestBitrate: false);
 
+  _SelectedTrack? _selectSubtitle(DashManifest manifest) => _selectTrack(
+    manifest,
+    C.trackTypeText,
+    lowestBitrate: false,
+    representationFilter: _isMuxableSubtitle,
+  );
+
+  bool _isTtmlSubtitle(_SelectedTrack track) =>
+      track.representation.format.codecs
+          ?.toLowerCase()
+          .split(',')
+          .any((codec) => codec.trim().startsWith('stpp')) ??
+      false;
+
+  bool _isMuxableSubtitle(Representation representation) {
+    final mime = representation.format.containerMimeType?.toLowerCase();
+    if (mime == null || !mime.endsWith('/mp4')) return false;
+    final codecs = representation.format.codecs?.toLowerCase().split(',');
+    if (codecs == null || codecs.isEmpty) return true;
+    return codecs.any((codec) {
+      final value = codec.trim();
+      return value.startsWith('wvtt') || value.startsWith('stpp');
+    });
+  }
+
   _SelectedTrack? _selectTrack(
     DashManifest manifest,
     int trackType, {
     required bool lowestBitrate,
+    bool Function(Representation representation)? representationFilter,
   }) {
     if (manifest.periodCount == 0) return null;
     final period = manifest.getPeriod(0);
     for (final as_ in period.adaptationSets) {
       if (as_.type != trackType) continue;
-      final reps = as_.representations;
+      final reps = as_.representations
+          .where(
+            (representation) =>
+                representationFilter?.call(representation) ?? true,
+          )
+          .toList(growable: false);
       if (reps.isEmpty) continue;
-      final kindName = trackType == C.trackTypeVideo ? 'video' : 'audio';
+      final kindName = switch (trackType) {
+        C.trackTypeVideo => 'video',
+        C.trackTypeAudio => 'audio',
+        C.trackTypeText => 'subtitle',
+        _ => 'unknown',
+      };
       if (!_renditionsLogged) {
         final renditions = reps
             .map(
@@ -800,4 +967,224 @@ class DashStreamServer {
     }
     throw Exception('Too many redirects fetching $url');
   }
+}
+
+List<DashSubtitleCue> _parseStppCues(
+  Uint8List fragment, {
+  required int segmentStartUs,
+  required int segmentDurationUs,
+  required int timelineOriginUs,
+}) {
+  final cues = <DashSubtitleCue>[];
+  for (final sample in _fragmentSamples(fragment)) {
+    final xmlSource = _extractTtmlDocument(sample);
+    if (xmlSource == null) continue;
+    try {
+      final document = XmlDocument.parse(xmlSource);
+      final root = document.rootElement;
+      final frameRate =
+          double.tryParse(_xmlAttribute(root, 'frameRate') ?? '') ?? 30;
+      final tickRate =
+          double.tryParse(_xmlAttribute(root, 'tickRate') ?? '') ?? 1;
+      final paragraphs = root.descendants
+          .whereType<XmlElement>()
+          .where((element) => element.name.local == 'p')
+          .toList(growable: false);
+      final parsedBegins = paragraphs
+          .map(
+            (paragraph) => _parseTtmlTime(
+              _xmlAttribute(paragraph, 'begin'),
+              frameRate: frameRate,
+              tickRate: tickRate,
+            ),
+          )
+          .whereType<int>()
+          .toList(growable: false);
+      final maxBegin = parsedBegins.isEmpty
+          ? 0
+          : parsedBegins.reduce((a, b) => a > b ? a : b);
+      // Most stpp profiles use media-timeline times. A few encoders reset each
+      // TTML document to zero; detect that only when the values are clearly far
+      // behind the enclosing segment to avoid shifting legitimate early cues.
+      final localDocumentTimeline =
+          parsedBegins.isNotEmpty &&
+          segmentStartUs - maxBegin >
+              (segmentDurationUs * 2 > 5000000
+                  ? segmentDurationUs * 2
+                  : 5000000) &&
+          maxBegin <= segmentDurationUs + 1000000;
+      final rebasedSegmentStartUs = segmentStartUs - timelineOriginUs;
+
+      for (final paragraph in paragraphs) {
+        final text = _ttmlText(paragraph);
+        if (text.isEmpty) continue;
+        final begin = _parseTtmlTime(
+          _xmlAttribute(paragraph, 'begin'),
+          frameRate: frameRate,
+          tickRate: tickRate,
+        );
+        final end = _parseTtmlTime(
+          _xmlAttribute(paragraph, 'end'),
+          frameRate: frameRate,
+          tickRate: tickRate,
+        );
+        final duration = _parseTtmlTime(
+          _xmlAttribute(paragraph, 'dur'),
+          frameRate: frameRate,
+          tickRate: tickRate,
+        );
+
+        var cueStartUs = begin == null
+            ? rebasedSegmentStartUs
+            : localDocumentTimeline
+            ? rebasedSegmentStartUs + begin
+            : begin - timelineOriginUs;
+        var cueEndUs = duration != null
+            ? cueStartUs + duration
+            : end == null
+            ? rebasedSegmentStartUs + segmentDurationUs
+            : localDocumentTimeline
+            ? rebasedSegmentStartUs + end
+            : end - timelineOriginUs;
+        if (cueStartUs < 0) cueStartUs = 0;
+        if (cueEndUs <= cueStartUs) cueEndUs = cueStartUs + 2000000;
+        cues.add(
+          DashSubtitleCue(
+            start: Duration(microseconds: cueStartUs),
+            end: Duration(microseconds: cueEndUs),
+            text: text,
+          ),
+        );
+      }
+    } catch (error) {
+      debugPrint('dash: TTML parse failed: $error');
+    }
+  }
+  return cues;
+}
+
+List<Uint8List> _fragmentSamples(Uint8List fragment) {
+  final boxes = parseBoxes(fragment, 0, fragment.length);
+  final moof = boxes.where((box) => box.type == 'moof').firstOrNull;
+  final mdat = boxes.where((box) => box.type == 'mdat').firstOrNull;
+  final data = mdat?.payload;
+  if (moof == null || data == null) return const [];
+
+  final sizes = <int>[];
+  for (final traf in moof.children.where((box) => box.type == 'traf')) {
+    final tfhd = traf.child('tfhd');
+    final defaultSize = tfhd?.payload == null
+        ? 0
+        : tfhdDefaultSampleSize(tfhd!.payload!);
+    for (final trun in traf.children.where((box) => box.type == 'trun')) {
+      final payload = trun.payload;
+      if (payload != null) sizes.addAll(parseTrun(payload, defaultSize).sizes);
+    }
+  }
+  if (sizes.isEmpty || sizes.any((size) => size <= 0)) return [data];
+
+  final samples = <Uint8List>[];
+  var offset = 0;
+  for (final size in sizes) {
+    if (offset + size > data.length) return [data];
+    samples.add(data.sublist(offset, offset + size));
+    offset += size;
+  }
+  return samples;
+}
+
+String? _extractTtmlDocument(Uint8List sample) {
+  final decoded = utf8.decode(sample, allowMalformed: true);
+  final rootMatch = RegExp(
+    r'<(?:([A-Za-z_][\w.-]*):)?tt(?:\s|>)',
+  ).firstMatch(decoded);
+  if (rootMatch == null) return null;
+  final prefix = rootMatch.group(1);
+  final closingTag = prefix == null ? '</tt>' : '</$prefix:tt>';
+  final end = decoded.indexOf(closingTag, rootMatch.start);
+  if (end < 0) return null;
+  return decoded.substring(rootMatch.start, end + closingTag.length);
+}
+
+String? _xmlAttribute(XmlElement element, String localName) {
+  for (final attribute in element.attributes) {
+    if (attribute.name.local == localName) return attribute.value;
+  }
+  return null;
+}
+
+String _ttmlText(XmlElement paragraph) {
+  final output = StringBuffer();
+
+  void append(XmlNode node) {
+    if (node is XmlText) {
+      output.write(node.value);
+      return;
+    }
+    if (node is! XmlElement) return;
+    if (node.name.local == 'br') {
+      output.write('\n');
+      return;
+    }
+    for (final child in node.children) {
+      append(child);
+    }
+  }
+
+  append(paragraph);
+  return output
+      .toString()
+      .split('\n')
+      .map((line) => line.replaceAll(RegExp(r'\s+'), ' ').trim())
+      .where((line) => line.isNotEmpty)
+      .join('\n');
+}
+
+int? _parseTtmlTime(
+  String? expression, {
+  required double frameRate,
+  required double tickRate,
+}) {
+  if (expression == null) return null;
+  final value = expression.trim();
+  if (value.isEmpty) return null;
+
+  final clock = RegExp(
+    r'^(\d+):(\d{2}):(\d{2})(?:[\.,](\d+))?(?::(\d+)(?:\.(\d+))?)?$',
+  ).firstMatch(value);
+  if (clock != null) {
+    final hours = int.parse(clock.group(1)!);
+    final minutes = int.parse(clock.group(2)!);
+    final seconds = int.parse(clock.group(3)!);
+    var micros = ((hours * 60 + minutes) * 60 + seconds) * 1000000;
+    final fraction = clock.group(4);
+    if (fraction != null) {
+      micros += (double.parse('0.$fraction') * 1000000).round();
+    }
+    final frames = clock.group(5);
+    if (frames != null && frameRate > 0) {
+      micros += (int.parse(frames) * 1000000 / frameRate).round();
+      final subframes = clock.group(6);
+      if (subframes != null) {
+        micros += (double.parse('0.$subframes') * 1000000 / frameRate).round();
+      }
+    }
+    return micros;
+  }
+
+  final offset = RegExp(
+    r'^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(ms|h|m|s|f|t)$',
+  ).firstMatch(value);
+  if (offset == null) return null;
+  final amount = double.parse(offset.group(1)!);
+  final seconds = switch (offset.group(2)!) {
+    'h' => amount * 3600,
+    'm' => amount * 60,
+    's' => amount,
+    'ms' => amount / 1000,
+    'f' => frameRate > 0 ? amount / frameRate : 0,
+    't' => tickRate > 0 ? amount / tickRate : 0,
+    _ => 0,
+  };
+  return (seconds * 1000000).round();
 }
