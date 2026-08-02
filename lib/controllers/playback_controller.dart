@@ -1344,7 +1344,11 @@ class PlaybackController extends ChangeNotifier {
     var streamUrl = channel.url;
     if (channel.isEncryptedDash) {
       try {
-        streamUrl = await _dashServer.start(channel.url, channel.clearKeys);
+        streamUrl = await _dashServer.start(
+          channel.url,
+          channel.clearKeys,
+          followLiveEdge: true,
+        );
         debugPrint('DASH engine started: $streamUrl');
         DebugLogService.instance.add(
           'ClearKey DASH engine started',
@@ -1603,11 +1607,7 @@ class PlaybackController extends ChangeNotifier {
       if (platform != null) {
         try {
           final nativePlatform = platform as dynamic;
-          await nativePlatform.command([
-            'loadfile',
-            reloadUrl,
-            'replace',
-          ]);
+          await nativePlatform.command(['loadfile', reloadUrl, 'replace']);
           // A raw loadfile bypasses media_kit's completed-state bookkeeping.
           // Calling Player.play() here makes media_kit replay a completed item
           // by seeking to zero, which fails for the non-seekable local DASH

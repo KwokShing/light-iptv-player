@@ -92,6 +92,10 @@ class DashStreamServer {
   String _mpdUrl = '';
   String _resolvedMpdUrl = '';
   Map<String, String> _keys = {};
+  // Playlist ClearKey entries are IPTV channels. Some origins publish short
+  // static MPD snapshots instead of declaring type="dynamic"; keep refreshing
+  // those snapshots at the edge rather than ending the local HTTP response.
+  bool _followLiveEdge = false;
 
   // Per-session tfdt origins (normalised trackId -> first decode time), used to
   // rebase the output timeline to 0. Reset on each start().
@@ -124,12 +128,19 @@ class DashStreamServer {
   String get _base => 'http://127.0.0.1:${_server?.port ?? 0}';
 
   /// Starts the server for [mpdUrl] with ClearKey [keys] (kidHex -> keyHex).
+  /// When [followLiveEdge] is true, a short static MPD is treated as a rolling
+  /// live snapshot and refreshed instead of closing the output at its edge.
   /// Returns the local URL to hand to mpv.
-  Future<String> start(String mpdUrl, Map<String, String> keys) async {
+  Future<String> start(
+    String mpdUrl,
+    Map<String, String> keys, {
+    bool followLiveEdge = false,
+  }) async {
     await stop();
     _client = _buildClient();
     _mpdUrl = mpdUrl;
     _resolvedMpdUrl = '';
+    _followLiveEdge = followLiveEdge;
     _tfdtOrigins.clear();
     _renditionsLogged = false;
     _keys = {
@@ -771,18 +782,16 @@ class DashStreamServer {
       return start < firstAvailable ? firstAvailable : start;
     }
 
-    // Static manifest. A short VOD (a handful of segments) plays from the
-    // start; but many "live" IPTV feeds ship a static MPD carrying a very long
-    // SegmentTimeline whose end is the live edge. Starting at segment 0 there
-    // means downloading/muxing hundreds of past segments before catching up —
-    // the multi-minute stall we saw. So if the timeline is long, jump to near
-    // its end and treat it like live.
+    // Static manifest. A short VOD normally plays from the start; however,
+    // ClearKey IPTV origins can publish a short rolling static snapshot. The
+    // caller marks those with _followLiveEdge so we start near the current edge
+    // and refresh in place. Long static timelines retain the older heuristic.
     final first = index.getFirstSegmentNum();
     final count = index.getSegmentCount(periodDurationUs);
     if (count == DashSegmentIndex.indexUnbounded) {
       return first;
     }
-    if (count > _liveLikeThreshold) {
+    if (_followLiveEdge || count > _liveLikeThreshold) {
       final lastAvailable = first + count - 1;
       final start = lastAvailable - _liveEdgeBackoff;
       return start < first ? first : start;
@@ -791,7 +800,8 @@ class DashStreamServer {
   }
 
   // A static manifest whose timeline is this long (segments) is treated as a
-  // growing live feed rather than a finite VOD.
+  // growing live feed rather than a finite VOD when no explicit caller hint is
+  // available.
   static const int _liveLikeThreshold = 20; // ~40-60s of 2-3s segments
 
   // Whether playback should follow a live edge (refresh the manifest for new
@@ -802,7 +812,7 @@ class DashStreamServer {
     _SelectedTrack track,
     int periodDurationUs,
   ) {
-    if (manifest.dynamic) return true;
+    if (manifest.dynamic || _followLiveEdge) return true;
     final count = track.index.getSegmentCount(periodDurationUs);
     if (count == DashSegmentIndex.indexUnbounded) return true;
     return count > _liveLikeThreshold;
