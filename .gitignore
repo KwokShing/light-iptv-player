@@ -19,10 +19,10 @@ Thumbs.db
 *.m3u
 *.m3u8
 
-# Custom MMT/TLV-capable libmpv runtime. Fetched automatically from the latest
-# KwokShing/mpv-builds Windows artifact by windows/CMakeLists.txt at configure
-# time (cached under build/), then installed over media_kit's bundled DLL. Kept
-# out of git regardless of where a copy might end up.
+# Custom libmpv development package. The latest mpv-dev-x86_64-v3 Release
+# asset from KwokShing/mpv-winbuild is fetched and SHA-256 verified by
+# windows/cmake/prepare_libmpv.cmake, then cached under build/. Keep any copied
+# runtime DLL out of git as well.
 libmpv-2.dll
 
 # Reference sources kept locally for study, not part of this project

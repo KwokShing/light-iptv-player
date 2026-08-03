@@ -26,6 +26,19 @@ flutter build windows
 
 Output: `build\windows\x64\runner\Release\light_iptv_player.exe`
 
+### Windows libmpv
+
+At CMake configure time, the build selects the single
+`mpv-dev-x86_64-v3-*.7z` asset from the latest
+[`KwokShing/mpv-winbuild`](https://github.com/KwokShing/mpv-winbuild/releases)
+Release and verifies its GitHub-provided SHA-256 digest. Its headers, import
+library, and `libmpv-2.dll` are used together by `media_kit`; a verified copy is
+cached under `build\windows\x64\libmpv`.
+
+The v3 build requires an x86-64-v3 capable processor. CMake 3.19 or newer and
+network access are required for the first configure; if the Release API is
+later unavailable, an existing verified cache can still be used.
+
 > Flutter Windows plugins require symlink support. If the build says symlink
 > support is missing, enable Windows Developer Mode via `ms-settings:developers`.
 

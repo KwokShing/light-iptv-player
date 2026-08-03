@@ -44,6 +44,21 @@ jobs:
           --build-name=${{ steps.meta.outputs.buildname }}
           --dart-define=RELEASE_TAG=${{ steps.meta.outputs.tag }}
 
+      - name: Verify mpv-winbuild libmpv
+        shell: pwsh
+        run: |
+          $required = @(
+            'build/windows/x64/libmpv/include/client.h',
+            'build/windows/x64/libmpv/include/render.h',
+            'build/windows/x64/libmpv/libmpv.dll.a',
+            'build/windows/x64/libmpv/libmpv-2.dll',
+            'build/windows/x64/runner/Release/libmpv-2.dll'
+          )
+          $missing = $required | Where-Object { -not (Test-Path $_) }
+          if ($missing) {
+            throw "mpv-winbuild libmpv files are missing: $($missing -join ', ')"
+          }
+
       - name: Verify AV3A decoder runtime
         shell: pwsh
         run: |
