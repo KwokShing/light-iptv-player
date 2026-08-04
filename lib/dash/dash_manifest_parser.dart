@@ -265,10 +265,12 @@ class DashManifestParser {
     final essentialProperties = <Descriptor>[];
     final supplementalProperties = <Descriptor>[];
     final accessibilityDescriptors = <Descriptor>[];
+    final roleDescriptors = <Descriptor>[];
     final inbandEventStreams = <Descriptor>[];
     final representationElements = <XmlElement>[];
     var hasContentProtection = false;
     String? defaultKid;
+    String? label;
 
     for (final child in as_.childElements) {
       switch (child.name.local) {
@@ -290,6 +292,12 @@ class DashManifestParser {
           break;
         case 'Accessibility':
           accessibilityDescriptors.add(_parseDescriptor(child));
+          break;
+        case 'Role':
+          roleDescriptors.add(_parseDescriptor(child));
+          break;
+        case 'Label':
+          label ??= child.innerText.trim();
           break;
         case 'EssentialProperty':
           essentialProperties.add(_parseDescriptor(child));
@@ -384,6 +392,8 @@ class DashManifestParser {
       accessibilityDescriptors,
       essentialProperties,
       supplementalProperties,
+      roleDescriptors: roleDescriptors,
+      label: label != null && label.isNotEmpty ? label : null,
     );
   }
 
@@ -414,6 +424,10 @@ class DashManifestParser {
     final id = rep.getAttribute('id');
     final bandwidth = _parseInt(rep, 'bandwidth', C.rateUnset);
 
+    // `lang` belongs on the AdaptationSet, but some packagers put every subtitle
+    // language in one set and only tag the Representations. Prefer the local
+    // attribute when present so those tracks stay distinguishable.
+    final language = rep.getAttribute('lang') ?? adaptationSetLanguage;
     final mimeType = rep.getAttribute('mimeType') ?? adaptationSetMimeType;
     final codecs = rep.getAttribute('codecs') ?? adaptationSetCodecs;
     final width = _parseInt(rep, 'width', adaptationSetWidth);
@@ -479,7 +493,7 @@ class DashManifestParser {
       frameRate: frameRate,
       sampleRate: audioSamplingRate,
       channelCount: audioChannels,
-      language: adaptationSetLanguage,
+      language: language,
     );
 
     final SegmentBase resolvedSegmentBase =

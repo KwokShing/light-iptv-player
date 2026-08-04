@@ -33,6 +33,9 @@ class PlaybackController extends ChangeNotifier {
     _dashSubtitleSubscription = _dashServer.subtitleCues.listen(
       _handleDashSubtitleCues,
     );
+    _dashTtmlTrackSubscription = _dashServer.ttmlTracks.listen(
+      _handleDashTtmlTracks,
+    );
     _listenPlaybackInfo();
   }
 
@@ -100,20 +103,42 @@ class PlaybackController extends ChangeNotifier {
   /// WebVTT renditions and embedded container tracks follow their default or
   /// forced disposition without carrying an "off" choice to the next video.
   bool subtitlesEnabled = true;
+
+  /// Every subtitle track offered to the viewer: the ones libmpv reports for the
+  /// current stream, followed by one synthetic entry per DASH TTML track that
+  /// Flutter has to draw itself.
   List<SubtitleTrack> subtitleTracks = const [];
+  List<SubtitleTrack> _nativeSubtitleTracks = const [];
+  List<DashTtmlTrack> _dashTtmlTracks = const [];
   String? _pendingDefaultSubtitleId;
+  String? _autoSelectedSubtitleId;
+
+  /// Marks a [SubtitleTrack] in [subtitleTracks] as a DASH TTML track rendered
+  /// by Flutter rather than one libmpv can select.
+  static const String _ttmlTrackIdPrefix = 'dash-ttml:';
 
   final List<DashSubtitleCue> _dashSubtitleCues = [];
   final Set<String> _dashSubtitleCueKeys = {};
-  bool _dashTtmlFallbackActive = false;
-  String? _dashTtmlSubtitleLabel;
-  bool get subtitlesAvailable =>
-      subtitleTracks.isNotEmpty || _dashTtmlFallbackActive;
-  String? get subtitleFallbackLabel =>
-      _dashTtmlFallbackActive ? _dashTtmlSubtitleLabel : null;
+  String? _selectedTtmlTrackId;
+  // Set once the viewer picks a TTML track explicitly, so a later native track
+  // discovery does not silently take it away from them.
+  bool _ttmlChosenByUser = false;
+  bool get subtitlesAvailable => subtitleTracks.isNotEmpty;
   Duration _rawPlaybackPosition = Duration.zero;
   String dashSubtitleText = '';
   StreamSubscription<List<DashSubtitleCue>>? _dashSubtitleSubscription;
+  StreamSubscription<List<DashTtmlTrack>>? _dashTtmlTrackSubscription;
+
+  /// The track the subtitle menu should show as active. A Flutter-rendered TTML
+  /// track is not known to libmpv, so it cannot come from [selectedTrack].
+  SubtitleTrack get activeSubtitleTrack {
+    final ttmlId = _selectedTtmlTrackId;
+    if (ttmlId == null) return selectedTrack.subtitle;
+    return subtitleTracks.firstWhere(
+      (track) => track.id == '$_ttmlTrackIdPrefix$ttmlId',
+      orElse: () => selectedTrack.subtitle,
+    );
+  }
 
   StreamSubscription<VideoParams>? _videoParamsSubscription;
   StreamSubscription<Track>? _trackSubscription;
@@ -222,6 +247,8 @@ class PlaybackController extends ChangeNotifier {
     unawaited(_cancelStreamSubscriptions());
     unawaited(_dashSubtitleSubscription?.cancel());
     _dashSubtitleSubscription = null;
+    unawaited(_dashTtmlTrackSubscription?.cancel());
+    _dashTtmlTrackSubscription = null;
     _bitrateTimer?.cancel();
     _reconnectTimer?.cancel();
     _connectTimer?.cancel();
@@ -419,25 +446,20 @@ class PlaybackController extends ChangeNotifier {
   void _handleDashSubtitleCues(List<DashSubtitleCue> cues) {
     if (_disposed) return;
     if (cues.isEmpty) {
-      final changed = dashSubtitleText.isNotEmpty || _dashTtmlFallbackActive;
+      // The server flushes an empty batch when a session ends or the selected
+      // TTML track changes, so the previous track's cues must not linger.
+      final changed =
+          dashSubtitleText.isNotEmpty || _dashSubtitleCues.isNotEmpty;
       _dashSubtitleCues.clear();
       _dashSubtitleCueKeys.clear();
-      _dashTtmlFallbackActive = false;
-      _dashTtmlSubtitleLabel = null;
       dashSubtitleText = '';
       if (changed) notifyListeners();
       return;
     }
+    // Segments for a track the viewer just switched away from can still be in
+    // flight; their cues belong to nothing on screen.
+    if (cues.first.trackId != _selectedTtmlTrackId) return;
 
-    final fallbackActivated = !_dashTtmlFallbackActive;
-    _dashTtmlFallbackActive = true;
-    _dashTtmlSubtitleLabel ??= _dashServer.ttmlSubtitleLabel;
-    if (fallbackActivated) {
-      DebugLogService.instance.add(
-        'Using Flutter TTML subtitle renderer',
-        source: 'app',
-      );
-    }
     for (final cue in cues) {
       final key =
           '${cue.start.inMicroseconds}|${cue.end.inMicroseconds}|'
@@ -457,21 +479,40 @@ class PlaybackController extends ChangeNotifier {
         );
       }
     }
-    final subtitleChanged = _updateDashSubtitleText(_rawPlaybackPosition);
-    if (fallbackActivated || subtitleChanged) notifyListeners();
+    if (_updateDashSubtitleText(_rawPlaybackPosition)) notifyListeners();
+  }
+
+  /// The DASH pipeline publishes the TTML tracks it found once the manifest has
+  /// been parsed. They are merged into [subtitleTracks] as synthetic entries so
+  /// the menu offers every language, not just the one that happened to load.
+  void _handleDashTtmlTracks(List<DashTtmlTrack> tracks) {
+    if (_disposed) return;
+    if (tracks.isNotEmpty && _dashTtmlTracks.isEmpty) {
+      DebugLogService.instance.add(
+        'Using Flutter TTML subtitle renderer for '
+        '${tracks.length} track(s)',
+        source: 'app',
+      );
+    }
+    _dashTtmlTracks = List<DashTtmlTrack>.unmodifiable(tracks);
+    _selectedTtmlTrackId = _dashServer.selectedTtmlTrackId;
+    final changed = _rebuildSubtitleTracks();
+    _autoSelectSubtitle();
+    if (changed) notifyListeners();
   }
 
   void _resetDashSubtitleFallback() {
     _dashSubtitleCues.clear();
     _dashSubtitleCueKeys.clear();
-    _dashTtmlFallbackActive = false;
-    _dashTtmlSubtitleLabel = null;
+    _dashTtmlTracks = const [];
+    _selectedTtmlTrackId = null;
+    _ttmlChosenByUser = false;
     _rawPlaybackPosition = Duration.zero;
     dashSubtitleText = '';
   }
 
   bool _updateDashSubtitleText(Duration at) {
-    final next = !_dashTtmlFallbackActive || !subtitlesEnabled
+    final next = _selectedTtmlTrackId == null || !subtitlesEnabled
         ? ''
         : _dashSubtitleCues
               .where((cue) => at >= cue.start && at < cue.end)
@@ -490,22 +531,68 @@ class PlaybackController extends ChangeNotifier {
           return id != 'auto' && id != 'no';
         })
         .toList(growable: false);
-    final unchanged =
-        subtitleTracks.length == next.length &&
-        List.generate(
-          next.length,
-          (index) => index,
-        ).every((index) => subtitleTracks[index].id == next[index].id);
-    if (unchanged) return false;
-
-    subtitleTracks = List<SubtitleTrack>.unmodifiable(next);
-    final selectedId = selectedTrack.subtitle.id.toLowerCase();
-    if (subtitlesEnabled &&
-        next.isNotEmpty &&
-        (selectedId.isEmpty || selectedId == 'auto' || selectedId == 'no')) {
-      unawaited(_selectDiscoveredSubtitle(next.first));
+    if (!_sameTrackIds(_nativeSubtitleTracks, next)) {
+      _nativeSubtitleTracks = List<SubtitleTrack>.unmodifiable(next);
     }
+    final changed = _rebuildSubtitleTracks();
+    _autoSelectSubtitle();
+    return changed;
+  }
+
+  bool _rebuildSubtitleTracks() {
+    final next = <SubtitleTrack>[
+      ..._nativeSubtitleTracks,
+      for (final track in _dashTtmlTracks)
+        SubtitleTrack(
+          '$_ttmlTrackIdPrefix${track.id}',
+          track.label,
+          track.language,
+        ),
+    ];
+    if (_sameTrackIds(subtitleTracks, next)) return false;
+    subtitleTracks = List<SubtitleTrack>.unmodifiable(next);
     return true;
+  }
+
+  static bool _sameTrackIds(List<SubtitleTrack> a, List<SubtitleTrack> b) =>
+      a.length == b.length &&
+      Iterable<int>.generate(a.length).every((i) => a[i].id == b[i].id);
+
+  /// Turns on the first sensible track once one shows up. DVB subtitles embedded
+  /// in MPEG-TS commonly have `default=0`, so mpv's `auto` selector leaves them
+  /// off; picking the first real track keeps the app's "subtitles on for every
+  /// video" behaviour deterministic.
+  void _autoSelectSubtitle() {
+    if (!subtitlesEnabled || nowPlaying == null) return;
+    if (_nativeSubtitleTracks.isEmpty) return;
+    // A TTML track the viewer chose stays put. One the DASH pipeline started by
+    // default gives way to a native track, since libmpv renders that itself and
+    // showing both would double the text on screen.
+    if (_selectedTtmlTrackId != null) {
+      if (_ttmlChosenByUser) return;
+      _selectDashTtmlTrack(null);
+    }
+    final selectedId = selectedTrack.subtitle.id.toLowerCase();
+    if (selectedId.isNotEmpty && selectedId != 'auto' && selectedId != 'no') {
+      return;
+    }
+    final first = _nativeSubtitleTracks.first;
+    // Try the default once per discovered track list. mpv answering with `no`
+    // must not turn the stream of track/videoParams events into a loop.
+    if (_autoSelectedSubtitleId == first.id) return;
+    _autoSelectedSubtitleId = first.id;
+    unawaited(_selectDiscoveredSubtitle(first));
+  }
+
+  /// Points the DASH pipeline at [id] (or stops TTML downloads when null) and
+  /// clears whatever the previous track had drawn.
+  void _selectDashTtmlTrack(String? id) {
+    if (_selectedTtmlTrackId == id) return;
+    _selectedTtmlTrackId = id;
+    _dashServer.selectTtmlTrack(id);
+    _dashSubtitleCues.clear();
+    _dashSubtitleCueKeys.clear();
+    dashSubtitleText = '';
   }
 
   static const String subtitleFontFamily = 'Microsoft JhengHei';
@@ -1238,15 +1325,21 @@ class PlaybackController extends ChangeNotifier {
     notifyListeners();
     if (!hasPlaybackEngine || nowPlaying == null) return;
     try {
-      if (enabled) await _setNativeSubtitleVisibility(true);
+      if (!enabled) {
+        await player.setSubtitleTrack(SubtitleTrack.no());
+        await _setNativeSubtitleVisibility(false);
+        return;
+      }
+      await _setNativeSubtitleVisibility(true);
+      // A Flutter-rendered TTML track is restored by _updateDashSubtitleText
+      // above; libmpv must stay silent so the two do not stack up.
       await player.setSubtitleTrack(
-        enabled && subtitleTracks.isNotEmpty
-            ? subtitleTracks.first
-            : enabled
-            ? SubtitleTrack.auto()
-            : SubtitleTrack.no(),
+        _selectedTtmlTrackId != null
+            ? SubtitleTrack.no()
+            : _nativeSubtitleTracks.isNotEmpty
+            ? _nativeSubtitleTracks.first
+            : SubtitleTrack.auto(),
       );
-      if (!enabled) await _setNativeSubtitleVisibility(false);
     } catch (error) {
       debugPrint(
         'Failed to ${enabled ? 'enable' : 'disable'} subtitles: $error',
@@ -1258,10 +1351,20 @@ class PlaybackController extends ChangeNotifier {
   Future<void> selectSubtitleTrack(SubtitleTrack track) async {
     subtitlesEnabled = true;
     _pendingDefaultSubtitleId = null;
+    final ttmlId = track.id.startsWith(_ttmlTrackIdPrefix)
+        ? track.id.substring(_ttmlTrackIdPrefix.length)
+        : null;
+    _ttmlChosenByUser = ttmlId != null;
+    _selectDashTtmlTrack(ttmlId);
     _updateDashSubtitleText(_rawPlaybackPosition);
     notifyListeners();
     if (!hasPlaybackEngine || nowPlaying == null) return;
     try {
+      if (ttmlId != null) {
+        // Flutter draws this one, so make sure libmpv is not showing another.
+        await player.setSubtitleTrack(SubtitleTrack.no());
+        return;
+      }
       await _setNativeSubtitleVisibility(true);
       await player.setSubtitleTrack(track);
     } catch (error) {
@@ -1315,7 +1418,9 @@ class PlaybackController extends ChangeNotifier {
     selectedTrack = const Track();
     subtitlesEnabled = true;
     subtitleTracks = const [];
+    _nativeSubtitleTracks = const [];
     _pendingDefaultSubtitleId = null;
+    _autoSelectedSubtitleId = null;
     _resetDashSubtitleFallback();
     position = Duration.zero;
     duration = Duration.zero;

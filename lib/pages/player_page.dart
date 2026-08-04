@@ -412,9 +412,8 @@ class _PlayerPageState extends State<PlayerPage> {
                                                   playback.subtitlesAvailable,
                                               subtitleTracks:
                                                   playback.subtitleTracks,
-                                              selectedSubtitle: playback
-                                                  .selectedTrack
-                                                  .subtitle,
+                                              selectedSubtitle:
+                                                  playback.activeSubtitleTrack,
                                               onToggleSubtitles:
                                                   playback.nowPlaying == null
                                                   ? null
@@ -463,7 +462,7 @@ class _PlayerPageState extends State<PlayerPage> {
                                       playback.subtitlesAvailable,
                                   subtitleTracks: playback.subtitleTracks,
                                   selectedSubtitle:
-                                      playback.selectedTrack.subtitle,
+                                      playback.activeSubtitleTrack,
                                   onToggleSubtitles: playback.nowPlaying == null
                                       ? null
                                       : playback.setSubtitlesEnabled,

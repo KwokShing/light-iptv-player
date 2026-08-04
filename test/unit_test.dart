@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:light_iptv_player/constants.dart';
 import 'package:light_iptv_player/controllers/sources_controller.dart';
+import 'package:light_iptv_player/dash/dash_c.dart';
 import 'package:light_iptv_player/dash/dash_manifest_parser.dart';
 import 'package:light_iptv_player/models/epg.dart';
 import 'package:light_iptv_player/models/playlist.dart';
@@ -311,6 +312,91 @@ https://example.com/drm.mpd
       final manifest = const DashManifestParser()
           .parse('https://cdn.test/x.mpd', withTrailer);
       expect(manifest.periodCount, 1);
+    });
+
+    test('keeps every subtitle AdaptationSet with its label and role', () {
+      const multiSubtitleMpd = '<?xml version="1.0"?>'
+          '<MPD type="static" mediaPresentationDuration="PT10S" '
+          'minBufferTime="PT2S">'
+          '<Period>'
+          '<AdaptationSet contentType="video" mimeType="video/mp4">'
+          '<Representation id="v0" bandwidth="500000" codecs="avc1.4d401f">'
+          '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+          'initialization="init_\$RepresentationID\$.mp4" '
+          'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+          '</Representation>'
+          '</AdaptationSet>'
+          '<AdaptationSet contentType="text" mimeType="application/mp4" '
+          'lang="eng" codecs="stpp">'
+          '<Role schemeIdUri="urn:mpeg:dash:role:2011" value="subtitle"/>'
+          '<Label>English</Label>'
+          '<Representation id="t-eng" bandwidth="1000">'
+          '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+          'initialization="init_\$RepresentationID\$.mp4" '
+          'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+          '</Representation>'
+          '</AdaptationSet>'
+          '<AdaptationSet contentType="text" mimeType="application/mp4" '
+          'lang="zho" codecs="stpp">'
+          '<Role schemeIdUri="urn:mpeg:dash:role:2011" value="forced-subtitle"/>'
+          '<Representation id="t-zho" bandwidth="1000">'
+          '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+          'initialization="init_\$RepresentationID\$.mp4" '
+          'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+          '</Representation>'
+          '</AdaptationSet>'
+          '</Period>'
+          '</MPD>';
+
+      final manifest = const DashManifestParser()
+          .parse('https://cdn.test/x.mpd', multiSubtitleMpd);
+      final textSets = manifest
+          .getPeriod(0)
+          .adaptationSets
+          .where((set) => set.type == C.trackTypeText)
+          .toList();
+
+      expect(textSets.length, 2);
+      expect(textSets.first.label, 'English');
+      expect(textSets.first.representations.single.format.language, 'eng');
+      expect(textSets.first.roleDescriptors.single.value, 'subtitle');
+      expect(textSets.last.label, isNull);
+      expect(textSets.last.representations.single.format.language, 'zho');
+      expect(textSets.last.roleDescriptors.single.value, 'forced-subtitle');
+    });
+
+    test('prefers a Representation-level lang over the AdaptationSet', () {
+      const mixedLangMpd = '<?xml version="1.0"?>'
+          '<MPD type="static" mediaPresentationDuration="PT10S" '
+          'minBufferTime="PT2S">'
+          '<Period>'
+          '<AdaptationSet contentType="text" mimeType="application/mp4" '
+          'lang="und" codecs="wvtt">'
+          '<Representation id="t-a" bandwidth="1000" lang="eng">'
+          '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+          'initialization="init_\$RepresentationID\$.mp4" '
+          'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+          '</Representation>'
+          '<Representation id="t-b" bandwidth="1000" lang="jpn">'
+          '<SegmentTemplate timescale="1000" duration="2000" startNumber="1" '
+          'initialization="init_\$RepresentationID\$.mp4" '
+          'media="seg_\$RepresentationID\$_\$Number\$.mp4"/>'
+          '</Representation>'
+          '</AdaptationSet>'
+          '</Period>'
+          '</MPD>';
+
+      final manifest = const DashManifestParser()
+          .parse('https://cdn.test/x.mpd', mixedLangMpd);
+      final languages = manifest
+          .getPeriod(0)
+          .adaptationSets
+          .single
+          .representations
+          .map((representation) => representation.format.language)
+          .toList();
+
+      expect(languages, ['eng', 'jpn']);
     });
   });
 }

@@ -548,7 +548,7 @@ class _SubtitleButton extends StatelessWidget {
           if (tracks.isEmpty)
             const PopupMenuItem<String>(
               enabled: false,
-              child: Text('s10000_chi'),
+              child: Text('No subtitle tracks'),
             ),
           for (var index = 0; index < tracks.length; index++)
             CheckedPopupMenuItem<String>(

@@ -1,8 +1,9 @@
 // Combines separate DASH video, audio and subtitle fMP4 streams into a
 // single multiplexed fMP4 that libmpv can demux as one file.
 //
-// Track IDs are normalised to 1 (video), 2 (audio) and 3 (subtitle). Inputs are
-// already-decrypted, single-track fMP4 (the output of `cenc.dart`).
+// Track IDs are normalised to 1 (video), 2 (audio) and 3, 4, 5, ... for each
+// text track. Inputs are already-decrypted, single-track fMP4 (the output of
+// `cenc.dart`).
 
 import 'dart:typed_data';
 
@@ -11,12 +12,41 @@ import 'cenc.dart';
 
 const int _videoTrackId = 1;
 const int _audioTrackId = 2;
-const int _subtitleTrackId = 3;
 
-/// Builds a merged init segment from a [video] init and optional [audio] and
-/// [subtitle] inits. The subtitle input must be an MP4 text track (for example
-/// `wvtt` or `stpp`), not a raw WebVTT/TTML document.
-Uint8List muxInit(Uint8List video, Uint8List? audio, [Uint8List? subtitle]) {
+/// Output track ID of the first muxed text track. Every additional text track
+/// takes the next ID, so a manifest with three subtitle languages produces
+/// tracks 3, 4 and 5.
+const int firstSubtitleTrackId = 3;
+
+/// One text track's initialisation segment plus the output track ID and
+/// language it should carry in the merged init.
+class SubtitleInit {
+  const SubtitleInit({
+    required this.trackId,
+    required this.data,
+    this.language,
+  });
+
+  /// Track ID this text track takes in the merged output.
+  final int trackId;
+
+  /// The track's own (already sanitised) fMP4 init segment.
+  final Uint8List data;
+
+  /// Language declared by the MPD. Written into the merged init so several
+  /// subtitle tracks show up with distinct labels instead of as unnamed
+  /// duplicates when the packager leaves the metadata out of the init segment.
+  final String? language;
+}
+
+/// Builds a merged init segment from a [video] init plus an optional [audio]
+/// init and any number of [subtitles]. Subtitle inputs must be MP4 text tracks
+/// (for example `wvtt` or `stpp`), not raw WebVTT/TTML documents.
+Uint8List muxInit(
+  Uint8List video,
+  Uint8List? audio, [
+  List<SubtitleInit> subtitles = const [],
+]) {
   final videoBoxes = parseBoxes(video, 0, video.length);
   final videoMoovs = videoBoxes.where((box) => box.type == 'moov').toList();
   if (videoMoovs.length != 1) {
@@ -34,8 +64,16 @@ Uint8List muxInit(Uint8List video, Uint8List? audio, [Uint8List? subtitle]) {
   if (_appendInitTrack(videoMoov, audio, _audioTrackId)) {
     highestTrackId = _audioTrackId;
   }
-  if (_appendInitTrack(videoMoov, subtitle, _subtitleTrackId)) {
-    highestTrackId = _subtitleTrackId;
+  for (final subtitle in subtitles) {
+    final appended = _appendInitTrack(
+      videoMoov,
+      subtitle.data,
+      subtitle.trackId,
+      language: subtitle.language,
+    );
+    if (appended && subtitle.trackId > highestTrackId) {
+      highestTrackId = subtitle.trackId;
+    }
   }
   _setMvhdNextTrackId(videoMoov, highestTrackId + 1);
 
@@ -43,7 +81,12 @@ Uint8List muxInit(Uint8List video, Uint8List? audio, [Uint8List? subtitle]) {
   return serializeBoxes([?ftyp, videoMoov]);
 }
 
-bool _appendInitTrack(Box targetMoov, Uint8List? source, int trackId) {
+bool _appendInitTrack(
+  Box targetMoov,
+  Uint8List? source,
+  int trackId, {
+  String? language,
+}) {
   if (source == null) return false;
   final sourceBoxes = parseBoxes(source, 0, source.length);
   final sourceMoov = _find(sourceBoxes, 'moov');
@@ -51,6 +94,7 @@ bool _appendInitTrack(Box targetMoov, Uint8List? source, int trackId) {
   if (sourceMoov == null || sourceTrak == null) return false;
 
   _setTrackId(sourceTrak, trackId);
+  _setTrackLanguage(sourceTrak, language);
   final lastTrakIndex = targetMoov.children.lastIndexWhere(
     (box) => box.type == 'trak',
   );
@@ -77,11 +121,16 @@ void _appendTrex(Box targetMoov, Box sourceMoov, int trackId) {
 
 /// Builds one merged media fragment. Missing optional fragments are omitted,
 /// allowing video/audio playback to continue across subtitle segment gaps.
+///
+/// [subtitles] maps a merged-output track ID (as handed to [muxInit]) to that
+/// track's fragment. Only the text tracks that have a segment covering this
+/// fragment need to be present; a subtitle segment usually spans several video
+/// segments, so most fragments carry none.
 Uint8List muxFragment(
   Uint8List video,
   Uint8List? audio,
   int sequenceNumber, [
-  Uint8List? subtitle,
+  Map<int, Uint8List> subtitles = const {},
 ]) {
   final videoBoxes = parseBoxes(video, 0, video.length);
   final videoMoof = _find(videoBoxes, 'moof');
@@ -102,9 +151,11 @@ Uint8List muxFragment(
   }
   _setMfhdSequence(videoMoof, sequenceNumber);
 
+  final subtitleTrackIds = subtitles.keys.toList(growable: false)..sort();
   final optionalParts = <_FragmentPart>[
     ?_fragmentPart(audio, _audioTrackId),
-    ?_fragmentPart(subtitle, _subtitleTrackId),
+    for (final trackId in subtitleTrackIds)
+      ?_fragmentPart(subtitles[trackId], trackId),
   ];
   final mergedMoof = Box(
     'moof',
@@ -190,6 +241,49 @@ void _setTrackId(Box trak, int id) {
   // Also set the tfhd inside any embedded... (init has no traf; skip.)
   // Update tkhd's internal reference only; sample entries are unaffected.
 }
+
+// Stamps the MPD-declared language onto a track so a stream with several
+// subtitle tracks produces a menu of distinguishable entries. Packagers that
+// leave `mdhd.language` at `und` in their text init segments would otherwise
+// yield N identical "Subtitle" rows.
+void _setTrackLanguage(Box trak, String? language) {
+  final packed = _packMdhdLanguage(language);
+  if (packed == null) return;
+  final p = trak.child('mdia')?.child('mdhd')?.payload;
+  if (p == null || p.isEmpty) return;
+  // v0: ver/flags(4) creation(4) modification(4) timescale(4) duration(4) then
+  // the packed language. v1 widens creation/modification to 8 and duration to 8.
+  final offset = p[0] == 1 ? 4 + 8 + 8 + 4 + 8 : 4 + 4 + 4 + 4 + 4;
+  if (p.length < offset + 2) return;
+  p[offset] = (packed >> 8) & 0xff;
+  p[offset + 1] = packed & 0xff;
+}
+
+// `mdhd` stores three lowercase ISO-639-2/T letters as 5 bits each. MPDs often
+// use the two-letter ISO-639-1 form instead, so the common codes are mapped;
+// anything else leaves the init segment's own metadata untouched.
+int? _packMdhdLanguage(String? language) {
+  var code = language?.trim().split(RegExp('[-_]')).first.toLowerCase();
+  if (code == null || code.isEmpty) return null;
+  if (code.length == 2) code = _iso639_1To2[code];
+  if (code == null || code.length != 3) return null;
+  var packed = 0;
+  for (final unit in code.codeUnits) {
+    if (unit < 0x61 || unit > 0x7a) return null;
+    packed = (packed << 5) | (unit - 0x60);
+  }
+  return packed;
+}
+
+const Map<String, String> _iso639_1To2 = {
+  'ar': 'ara', 'bn': 'ben', 'cs': 'ces', 'da': 'dan', 'de': 'deu',
+  'el': 'ell', 'en': 'eng', 'es': 'spa', 'fa': 'fas', 'fi': 'fin',
+  'fr': 'fra', 'he': 'heb', 'hi': 'hin', 'hu': 'hun', 'id': 'ind',
+  'it': 'ita', 'ja': 'jpn', 'ko': 'kor', 'ms': 'msa', 'nl': 'nld',
+  'no': 'nor', 'pl': 'pol', 'pt': 'por', 'ro': 'ron', 'ru': 'rus',
+  'sv': 'swe', 'ta': 'tam', 'te': 'tel', 'th': 'tha', 'tr': 'tur',
+  'uk': 'ukr', 'vi': 'vie', 'zh': 'chi',
+};
 
 int _tfhdTrackId(Uint8List p) => readU32(p, 4); // ver/flags(4) then track_ID(4)
 

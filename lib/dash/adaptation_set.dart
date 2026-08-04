@@ -18,12 +18,21 @@ class AdaptationSet {
   final List<Descriptor> essentialProperties;
   final List<Descriptor> supplementalProperties;
 
+  /// `Role` descriptors (`urn:mpeg:dash:role:2011`). Used to tell apart several
+  /// text tracks that share a language, e.g. `subtitle` versus `forced-subtitle`.
+  final List<Descriptor> roleDescriptors;
+
+  /// Human-readable `Label` element, when the packager supplies one.
+  final String? label;
+
   AdaptationSet(
     this.id,
     this.type,
     this.representations,
     this.accessibilityDescriptors,
     this.essentialProperties,
-    this.supplementalProperties,
-  );
+    this.supplementalProperties, {
+    this.roleDescriptors = const [],
+    this.label,
+  });
 }

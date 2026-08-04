@@ -23,6 +23,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:xml/xml.dart';
 
+import 'adaptation_set.dart';
 import 'dash_c.dart';
 import 'dash_manifest.dart';
 import 'dash_manifest_parser.dart';
@@ -37,14 +38,31 @@ import 'representation.dart';
 /// Times are rebased to the local progressive stream handed to libmpv.
 class DashSubtitleCue {
   const DashSubtitleCue({
+    required this.trackId,
     required this.start,
     required this.end,
     required this.text,
   });
 
+  /// [DashTtmlTrack.id] the cue belongs to, so cues still in flight for a
+  /// track the viewer just switched away from can be discarded.
+  final String trackId;
   final Duration start;
   final Duration end;
   final String text;
+}
+
+/// A DASH text track that has to be rendered by Flutter because it carries TTML
+/// (`stpp`), which the bundled libavcodec cannot decode.
+///
+/// Native `wvtt` text tracks are deliberately absent from this list: they are
+/// muxed into the fMP4 and reported by libmpv itself.
+class DashTtmlTrack {
+  const DashTtmlTrack({required this.id, required this.label, this.language});
+
+  final String id;
+  final String label;
+  final String? language;
 }
 
 /// A selected track: its representation plus the resolved base URL used to
@@ -58,6 +76,48 @@ class _SelectedTrack {
   final String kind; // 'video' or 'audio', for perf logging
 
   TrackCrypto? crypto; // discovered from the init segment
+}
+
+/// One selectable DASH text track and how it reaches the screen: muxed into the
+/// fMP4 for libmpv ([ttml] false) or parsed in Dart and drawn by Flutter.
+class _SubtitleStream {
+  _SubtitleStream({
+    required this.id,
+    required this.label,
+    required this.language,
+    required this.ttml,
+    required this.outputTrackId,
+    required this.track,
+  });
+
+  /// Stable id (the Representation id where available) used to match the track
+  /// again after a live manifest refresh and to address it from the UI.
+  final String id;
+  final String label;
+  final String? language;
+  final bool ttml;
+
+  /// fMP4 track ID in the merged output. Unused for [ttml] tracks.
+  final int outputTrackId;
+
+  _SelectedTrack track;
+
+  /// Presentation time this track's timeline is rebased against, matching the
+  /// video track's normalised zero point.
+  int? timelineOriginUs;
+
+  DashTtmlTrack get info =>
+      DashTtmlTrack(id: id, label: label, language: language);
+}
+
+/// A subtitle segment scheduled for one output fragment.
+class _SubtitleRequest {
+  _SubtitleRequest(this.stream, this.segmentNum, this.key);
+
+  final _SubtitleStream stream;
+  final int segmentNum;
+  final String key;
+  Uint8List? data;
 }
 
 class _ManifestFetchException implements Exception {
@@ -109,8 +169,33 @@ class DashStreamServer {
   Stream<List<DashSubtitleCue>> get subtitleCues =>
       _subtitleCueController.stream;
 
-  String? _ttmlSubtitleLabel;
-  String? get ttmlSubtitleLabel => _ttmlSubtitleLabel;
+  final StreamController<List<DashTtmlTrack>> _ttmlTracksController =
+      StreamController<List<DashTtmlTrack>>.broadcast();
+
+  /// Text tracks that Flutter has to render. Emitted once the session's
+  /// manifest has been parsed and its init segments fetched.
+  Stream<List<DashTtmlTrack>> get ttmlTracks => _ttmlTracksController.stream;
+
+  List<DashTtmlTrack> _ttmlTrackList = const [];
+  List<DashTtmlTrack> get ttmlTrackList => _ttmlTrackList;
+
+  String? _selectedTtmlTrackId;
+  String? get selectedTtmlTrackId => _selectedTtmlTrackId;
+  bool _ttmlSelectionInitialised = false;
+
+  /// Chooses which TTML track produces cues, or none when [id] is null (the
+  /// viewer picked a native track or turned subtitles off). Only one is
+  /// downloaded at a time because a single Flutter overlay renders them.
+  void selectTtmlTrack(String? id) {
+    if (_selectedTtmlTrackId == id) return;
+    _selectedTtmlTrackId = id;
+    _ttmlSelectionInitialised = true;
+    // Drop the cues of the previous track; the new one starts from the next
+    // subtitle segment the producer schedules.
+    if (!_subtitleCueController.isClosed) {
+      _subtitleCueController.add(const <DashSubtitleCue>[]);
+    }
+  }
 
   // Preserve the tuned Android identity by default while allowing the global
   // setting to override it for every manifest and segment request.
@@ -143,6 +228,7 @@ class DashStreamServer {
     _followLiveEdge = followLiveEdge;
     _tfdtOrigins.clear();
     _renditionsLogged = false;
+    _ttmlSelectionInitialised = false;
     _keys = {
       for (final e in keys.entries)
         e.key.replaceAll(RegExp(r'[^0-9a-fA-F]'), '').toLowerCase(): e.value
@@ -157,7 +243,12 @@ class DashStreamServer {
 
   Future<void> stop() async {
     _sessionSeq++;
-    _ttmlSubtitleLabel = null;
+    _ttmlTrackList = const [];
+    _selectedTtmlTrackId = null;
+    _ttmlSelectionInitialised = false;
+    if (!_ttmlTracksController.isClosed) {
+      _ttmlTracksController.add(const <DashTtmlTrack>[]);
+    }
     if (!_subtitleCueController.isClosed) {
       _subtitleCueController.add(const <DashSubtitleCue>[]);
     }
@@ -180,6 +271,7 @@ class DashStreamServer {
   void dispose() {
     unawaited(stop());
     unawaited(_subtitleCueController.close());
+    unawaited(_ttmlTracksController.close());
   }
 
   Future<void> _handle(HttpRequest req) async {
@@ -233,10 +325,7 @@ class DashStreamServer {
 
     final video = _selectVideo(manifest);
     final audio = _selectAudio(manifest);
-    final subtitle = _selectSubtitle(manifest);
-    _ttmlSubtitleLabel = subtitle != null && _isTtmlSubtitle(subtitle)
-        ? subtitle.representation.format.id
-        : null;
+    final selectedSubtitles = _selectSubtitles(manifest);
     _renditionsLogged = true;
     if (video == null) {
       debugPrint('dash: no video representation found');
@@ -246,7 +335,7 @@ class DashStreamServer {
     debugPrint(
       'dash: selected video=${video.representation.format} '
       'audio=${audio?.representation.format} '
-      'subtitle=${subtitle?.representation.format}',
+      'subtitles=${_describeSubtitles(selectedSubtitles)}',
     );
 
     req.response.statusCode = HttpStatus.ok;
@@ -258,23 +347,39 @@ class DashStreamServer {
     final inits = await Future.wait<Uint8List?>([
       _loadInit(video),
       if (audio != null) _loadInit(audio),
-      if (subtitle != null) _loadInit(subtitle),
+      for (final subtitle in selectedSubtitles) _loadInit(subtitle.track),
     ]);
     final videoInitRaw = inits[0];
-    var nextInit = 1;
-    final audioInitRaw = audio != null ? inits[nextInit++] : null;
-    final subtitleInitRaw = subtitle != null ? inits[nextInit] : null;
     if (videoInitRaw == null) {
       debugPrint('dash: failed to load video init');
       return;
     }
-    // TTML is parsed below and rendered by Flutter. Do not expose its stpp
-    // track to libmpv: the bundled libavcodec has no TTML subtitle converter,
-    // so including it only causes decoder errors. WebVTT remains native.
-    final nativeSubtitleInit = subtitle != null && _isTtmlSubtitle(subtitle)
-        ? null
-        : subtitleInitRaw;
-    final mergedInit = muxInit(videoInitRaw, audioInitRaw, nativeSubtitleInit);
+    var nextInit = 1;
+    final audioInitRaw = audio != null ? inits[nextInit++] : null;
+    // Every text track whose init segment loaded stays selectable. TTML tracks
+    // are parsed below and rendered by Flutter, so their stpp track is kept out
+    // of the fMP4: the bundled libavcodec has no TTML subtitle converter and
+    // including it only causes decoder errors. WebVTT remains native.
+    final subtitles = <_SubtitleStream>[];
+    final nativeSubtitleInits = <SubtitleInit>[];
+    for (final subtitle in selectedSubtitles) {
+      final init = inits[nextInit++];
+      if (init == null) {
+        debugPrint('dash: failed to load subtitle init for ${subtitle.id}');
+        continue;
+      }
+      subtitles.add(subtitle);
+      if (subtitle.ttml) continue;
+      nativeSubtitleInits.add(
+        SubtitleInit(
+          trackId: subtitle.outputTrackId,
+          data: init,
+          language: subtitle.language,
+        ),
+      );
+    }
+    _publishTtmlTracks(subtitles);
+    final mergedInit = muxInit(videoInitRaw, audioInitRaw, nativeSubtitleInits);
     if (session != _sessionSeq) return;
     req.response.add(mergedInit);
     await req.response.flush();
@@ -298,23 +403,26 @@ class DashStreamServer {
 
     var videoTrack = video;
     var audioTrack = audio;
-    var subtitleTrack = subtitleInitRaw == null ? null : subtitle;
-    int? subtitleTimelineOriginUs;
-    if (subtitleTrack != null) {
+    // Anchor every text track against the same video start time so cues line up
+    // with the output timeline no matter which one is picked, including a track
+    // the viewer switches to later in the session.
+    for (final subtitle in subtitles) {
       try {
         final videoStartUs = video.index.getTimeUs(segmentNum);
         final firstSubtitleSegment = _segmentCoveringTime(
-          subtitleTrack.index,
+          subtitle.track.index,
           videoStartUs,
           periodDurationUs,
         );
         if (firstSubtitleSegment != null) {
-          subtitleTimelineOriginUs = subtitleTrack.index.getTimeUs(
+          subtitle.timelineOriginUs = subtitle.track.index.getTimeUs(
             firstSubtitleSegment,
           );
         }
       } catch (error) {
-        debugPrint('dash: subtitle timeline origin failed: $error');
+        debugPrint(
+          'dash: subtitle timeline origin failed for ${subtitle.id}: $error',
+        );
       }
     }
 
@@ -355,13 +463,12 @@ class DashStreamServer {
           pipeline[seg] = _loadMuxedFragment(
             videoTrack,
             audioTrack,
-            subtitleTrack,
+            subtitles,
             seg,
             seg,
             periodDurationUs,
             scheduledSubtitleSegments,
             session,
-            subtitleTimelineOriginUs,
           );
           n++;
         }
@@ -434,7 +541,6 @@ class DashStreamServer {
               periodDurationUs = manifest.getPeriodDurationUs(periodIndex);
               final newVideo = _selectVideo(manifest);
               final newAudio = _selectAudio(manifest);
-              final newSubtitle = _selectSubtitle(manifest);
               if (newVideo != null) {
                 newVideo.crypto = videoTrack.crypto;
                 videoTrack = newVideo;
@@ -444,11 +550,7 @@ class DashStreamServer {
                 newAudio.crypto = currentAudio.crypto;
                 audioTrack = newAudio;
               }
-              final currentSubtitle = subtitleTrack;
-              if (newSubtitle != null && currentSubtitle != null) {
-                newSubtitle.crypto = currentSubtitle.crypto;
-                subtitleTrack = newSubtitle;
-              }
+              _refreshSubtitleRepresentations(subtitles, manifest);
               // If the segment we want still isn't in the refreshed timeline,
               // jump to the fresh manifest's live edge and resume there. This
               // is the "reload the pipeline" behaviour: rather than waiting
@@ -567,13 +669,12 @@ class DashStreamServer {
   Future<Uint8List?> _loadMuxedFragment(
     _SelectedTrack video,
     _SelectedTrack? audio,
-    _SelectedTrack? subtitle,
+    List<_SubtitleStream> subtitles,
     int segmentNum,
     int sequence,
     int periodDurationUs,
     Set<String> scheduledSubtitleSegments,
     int session,
-    int? subtitleTimelineOriginUs,
   ) async {
     // A refreshed live manifest can temporarily end before the old playback
     // cursor. Let the existing edge refresh/re-anchor path handle that miss
@@ -582,90 +683,102 @@ class DashStreamServer {
       return null;
     }
 
-    int? subtitleSegmentNum;
-    String? subtitleSegmentKey;
-    if (subtitle != null) {
+    final selectedTtmlId = _selectedTtmlTrackId;
+    final requests = <_SubtitleRequest>[];
+    for (final subtitle in subtitles) {
+      // Native tracks all ride along in the fMP4 so libmpv can offer them as a
+      // real track menu. TTML tracks are drawn by a single Flutter overlay, so
+      // only the selected one is worth downloading.
+      if (subtitle.ttml && subtitle.id != selectedTtmlId) continue;
       try {
         final presentationTimeUs = video.index.getTimeUs(segmentNum);
         final candidate = _segmentCoveringTime(
-          subtitle.index,
+          subtitle.track.index,
           presentationTimeUs,
           periodDurationUs,
         );
-        if (candidate != null) {
-          final segmentStartUs = subtitle.index.getTimeUs(candidate);
-          final key = '${subtitle.representation.format.id}|$segmentStartUs';
-          if (scheduledSubtitleSegments.add(key)) {
-            subtitleSegmentNum = candidate;
-            subtitleSegmentKey = key;
-          }
-        }
+        if (candidate == null) continue;
+        final segmentStartUs = subtitle.track.index.getTimeUs(candidate);
+        final key = '${subtitle.id}|$segmentStartUs';
+        if (!scheduledSubtitleSegments.add(key)) continue;
+        requests.add(_SubtitleRequest(subtitle, candidate, key));
       } catch (error) {
-        debugPrint('dash: subtitle segment lookup failed: $error');
+        debugPrint(
+          'dash: subtitle segment lookup failed for ${subtitle.id}: $error',
+        );
+      }
+    }
+
+    void unschedule() {
+      for (final request in requests) {
+        scheduledSubtitleSegments.remove(request.key);
       }
     }
 
     final results = await Future.wait<Uint8List?>([
       _loadSegment(video, segmentNum),
       if (audio != null) _loadSegment(audio, segmentNum),
-      if (subtitle != null && subtitleSegmentNum != null)
-        _loadSegment(subtitle, subtitleSegmentNum),
+      for (final request in requests)
+        _loadSegment(request.stream.track, request.segmentNum),
     ]);
     final videoSeg = results[0];
     var nextResult = 1;
     final audioSeg = audio != null ? results[nextResult++] : null;
-    final subtitleSeg = subtitle != null && subtitleSegmentNum != null
-        ? results[nextResult]
-        : null;
-    if (videoSeg == null ||
-        (subtitleSegmentKey != null && subtitleSeg == null)) {
-      if (subtitleSegmentKey != null) {
-        scheduledSubtitleSegments.remove(subtitleSegmentKey);
-      }
-      if (videoSeg == null) return null;
+    for (final request in requests) {
+      request.data = results[nextResult++];
+      // A subtitle segment that failed is released so a later fragment retries
+      // it instead of the track silently losing that stretch of cues.
+      if (request.data == null) scheduledSubtitleSegments.remove(request.key);
+    }
+    if (videoSeg == null) {
+      unschedule();
+      return null;
     }
     try {
-      final isTtml = subtitle != null && _isTtmlSubtitle(subtitle);
-      // Keep downloading TTML for Dart parsing, but omit it from the fMP4
-      // consumed by libmpv. This prevents unsupported native TTML decoding.
-      final muxed = muxFragment(
-        videoSeg,
-        audioSeg,
-        sequence,
-        isTtml ? null : subtitleSeg,
-      );
-      if (isTtml &&
-          subtitleSeg != null &&
-          subtitleSegmentNum != null &&
-          subtitleTimelineOriginUs != null &&
-          session == _sessionSeq) {
-        final segmentStartUs = subtitle.index.getTimeUs(subtitleSegmentNum);
-        final segmentDurationUs = subtitle.index.getDurationUs(
-          subtitleSegmentNum,
-          periodDurationUs,
-        );
-        final cues = _parseStppCues(
-          subtitleSeg,
-          segmentStartUs: segmentStartUs,
-          segmentDurationUs: segmentDurationUs,
-          timelineOriginUs: subtitleTimelineOriginUs,
-        );
-        if (cues.isNotEmpty && !_subtitleCueController.isClosed) {
-          debugPrint(
-            'dash: parsed ${cues.length} TTML cues from subtitle segment '
-            '$subtitleSegmentNum',
-          );
-          _subtitleCueController.add(cues);
-        }
+      final muxed = muxFragment(videoSeg, audioSeg, sequence, {
+        for (final request in requests)
+          if (!request.stream.ttml && request.data != null)
+            request.stream.outputTrackId: request.data!,
+      });
+      for (final request in requests) {
+        _emitTtmlCues(request, periodDurationUs, session);
       }
       return muxed;
     } catch (error) {
-      if (subtitleSegmentKey != null) {
-        scheduledSubtitleSegments.remove(subtitleSegmentKey);
-      }
+      unschedule();
       debugPrint('dash: mux failed at seg $segmentNum: $error');
       return null;
     }
+  }
+
+  void _emitTtmlCues(
+    _SubtitleRequest request,
+    int periodDurationUs,
+    int session,
+  ) {
+    final stream = request.stream;
+    final data = request.data;
+    final originUs = stream.timelineOriginUs;
+    if (!stream.ttml || data == null || originUs == null) return;
+    // A track switch or a new channel while this segment was downloading makes
+    // the cues stale; the selected track's own segments follow shortly.
+    if (session != _sessionSeq || stream.id != _selectedTtmlTrackId) return;
+    final cues = _parseStppCues(
+      data,
+      trackId: stream.id,
+      segmentStartUs: stream.track.index.getTimeUs(request.segmentNum),
+      segmentDurationUs: stream.track.index.getDurationUs(
+        request.segmentNum,
+        periodDurationUs,
+      ),
+      timelineOriginUs: originUs,
+    );
+    if (cues.isEmpty || _subtitleCueController.isClosed) return;
+    debugPrint(
+      'dash: parsed ${cues.length} TTML cues for ${stream.id} from subtitle '
+      'segment ${request.segmentNum}',
+    );
+    _subtitleCueController.add(cues);
   }
 
   // ---------------------------------------------------------------------------
@@ -678,19 +791,162 @@ class DashStreamServer {
   _SelectedTrack? _selectAudio(DashManifest manifest) =>
       _selectTrack(manifest, C.trackTypeAudio, lowestBitrate: false);
 
-  _SelectedTrack? _selectSubtitle(DashManifest manifest) => _selectTrack(
-    manifest,
-    C.trackTypeText,
-    lowestBitrate: false,
-    representationFilter: _isMuxableSubtitle,
-  );
+  // Downloading every text track costs almost nothing (subtitle segments are a
+  // few KB), but cap the count so a pathological manifest cannot flood the
+  // connection pool or the track menu.
+  static const int _maxSubtitleTracks = 8;
 
-  bool _isTtmlSubtitle(_SelectedTrack track) =>
-      track.representation.format.codecs
-          ?.toLowerCase()
-          .split(',')
-          .any((codec) => codec.trim().startsWith('stpp')) ??
-      false;
+  /// Every text track in the manifest, not just the first one. Multi-language
+  /// MPDs publish one text AdaptationSet per language; selecting only the first
+  /// is what previously reduced them to a single loadable subtitle track.
+  List<_SubtitleStream> _selectSubtitles(DashManifest manifest) {
+    if (manifest.periodCount == 0) return const [];
+    final period = manifest.getPeriod(0);
+    final streams = <_SubtitleStream>[];
+    final ids = <String>{};
+    var nextOutputTrackId = firstSubtitleTrackId;
+    for (final set in period.adaptationSets) {
+      if (set.type != C.trackTypeText) continue;
+      for (final representation in _subtitleRepresentations(set)) {
+        if (streams.length >= _maxSubtitleTracks) break;
+        final index = representation.getIndex();
+        if (index == null) continue;
+        final id =
+            representation.format.id ??
+            'as${set.id}-${representation.format.language ?? streams.length}';
+        if (!ids.add(id)) continue;
+        final ttml = _isTtmlSubtitle(representation);
+        streams.add(
+          _SubtitleStream(
+            id: id,
+            label: _subtitleLabel(set, representation),
+            language: representation.format.language,
+            ttml: ttml,
+            outputTrackId: ttml ? 0 : nextOutputTrackId++,
+            track: _SelectedTrack(
+              representation,
+              representation.baseUrls.first.url,
+              index,
+              'subtitle',
+            ),
+          ),
+        );
+      }
+    }
+    if (!_renditionsLogged && streams.isNotEmpty) {
+      debugPrint('dash: available subtitle tracks: '
+          '${_describeSubtitles(streams)}');
+    }
+    return streams;
+  }
+
+  // A text AdaptationSet normally holds one Representation, but some packagers
+  // pack every language into a single set. Group by language and keep the
+  // highest-bitrate rendition of each so both layouts yield one track per
+  // language rather than one track per set.
+  Iterable<Representation> _subtitleRepresentations(AdaptationSet set) {
+    final byLanguage = <String, Representation>{};
+    for (final representation in set.representations) {
+      if (!_isMuxableSubtitle(representation)) continue;
+      final key = (representation.format.language ?? '').toLowerCase();
+      final current = byLanguage[key];
+      if (current == null ||
+          representation.format.bitrate > current.format.bitrate) {
+        byLanguage[key] = representation;
+      }
+    }
+    return byLanguage.values;
+  }
+
+  String _subtitleLabel(AdaptationSet set, Representation representation) {
+    final parts = <String>[];
+    final label = set.label?.trim();
+    final language = representation.format.language?.trim();
+    if (label != null && label.isNotEmpty) {
+      parts.add(label);
+    } else if (language != null && language.isNotEmpty) {
+      parts.add(language);
+    } else {
+      parts.add(representation.format.id ?? 'Subtitle');
+    }
+    // A role tells apart two tracks in the same language, e.g. a full
+    // translation next to a forced-narrative or hearing-impaired variant.
+    for (final role in set.roleDescriptors) {
+      final value = role.value?.trim().toLowerCase();
+      if (value == null || value.isEmpty) continue;
+      if (value == 'main' || value == 'subtitle' || value == 'alternate') {
+        continue;
+      }
+      parts.add(value);
+    }
+    return parts.join(' · ');
+  }
+
+  String _describeSubtitles(List<_SubtitleStream> subtitles) => subtitles.isEmpty
+      ? 'none'
+      : subtitles
+            .map(
+              (subtitle) =>
+                  '${subtitle.id}/${subtitle.language ?? '?'}'
+                  '${subtitle.ttml ? ' (ttml)' : ''}',
+            )
+            .join(', ');
+
+  void _publishTtmlTracks(List<_SubtitleStream> subtitles) {
+    final tracks = subtitles
+        .where((subtitle) => subtitle.ttml)
+        .map((subtitle) => subtitle.info)
+        .toList(growable: false);
+    final changed =
+        tracks.length != _ttmlTrackList.length ||
+        Iterable<int>.generate(
+          tracks.length,
+        ).any((index) => tracks[index].id != _ttmlTrackList[index].id);
+    _ttmlTrackList = List<DashTtmlTrack>.unmodifiable(tracks);
+    if (!tracks.any((track) => track.id == _selectedTtmlTrackId)) {
+      // Subtitles are on by default, so start the first TTML track without
+      // waiting for the UI to round-trip a selection. Once the viewer has picked
+      // a track (or a native one) their choice is left alone.
+      _selectedTtmlTrackId = _ttmlSelectionInitialised || tracks.isEmpty
+          ? null
+          : tracks.first.id;
+    }
+    if (changed && !_ttmlTracksController.isClosed) {
+      _ttmlTracksController.add(_ttmlTrackList);
+    }
+  }
+
+  /// Re-points each still-present text track at the refreshed manifest's
+  /// representation while keeping its id, output track ID and timeline origin,
+  /// so a live reload does not renumber the subtitle menu.
+  void _refreshSubtitleRepresentations(
+    List<_SubtitleStream> subtitles,
+    DashManifest manifest,
+  ) {
+    if (subtitles.isEmpty) return;
+    final refreshed = {
+      for (final subtitle in _selectSubtitles(manifest)) subtitle.id: subtitle,
+    };
+    for (final subtitle in subtitles) {
+      final next = refreshed[subtitle.id];
+      if (next == null) continue;
+      next.track.crypto = subtitle.track.crypto;
+      subtitle.track = next.track;
+    }
+  }
+
+  bool _isTtmlSubtitle(Representation representation) {
+    final codecs = representation.format.codecs?.toLowerCase();
+    if (codecs != null &&
+        codecs.split(',').any((codec) => codec.trim().startsWith('stpp'))) {
+      return true;
+    }
+    // Some packagers omit `codecs` for text and only declare the sample type.
+    return representation.format.sampleMimeType?.toLowerCase().contains(
+          'ttml',
+        ) ??
+        false;
+  }
 
   bool _isMuxableSubtitle(Representation representation) {
     final mime = representation.format.containerMimeType?.toLowerCase();
@@ -707,18 +963,12 @@ class DashStreamServer {
     DashManifest manifest,
     int trackType, {
     required bool lowestBitrate,
-    bool Function(Representation representation)? representationFilter,
   }) {
     if (manifest.periodCount == 0) return null;
     final period = manifest.getPeriod(0);
     for (final as_ in period.adaptationSets) {
       if (as_.type != trackType) continue;
-      final reps = as_.representations
-          .where(
-            (representation) =>
-                representationFilter?.call(representation) ?? true,
-          )
-          .toList(growable: false);
+      final reps = as_.representations;
       if (reps.isEmpty) continue;
       final kindName = switch (trackType) {
         C.trackTypeVideo => 'video',
@@ -1035,6 +1285,7 @@ class DashStreamServer {
 
 List<DashSubtitleCue> _parseStppCues(
   Uint8List fragment, {
+  required String trackId,
   required int segmentStartUs,
   required int segmentDurationUs,
   required int timelineOriginUs,
@@ -1114,6 +1365,7 @@ List<DashSubtitleCue> _parseStppCues(
         if (cueEndUs <= cueStartUs) cueEndUs = cueStartUs + 2000000;
         cues.add(
           DashSubtitleCue(
+            trackId: trackId,
             start: Duration(microseconds: cueStartUs),
             end: Duration(microseconds: cueEndUs),
             text: text,
