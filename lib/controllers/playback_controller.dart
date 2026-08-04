@@ -390,7 +390,7 @@ class PlaybackController extends ChangeNotifier {
     // Must start before the VideoController below is constructed: it races
     // against VideoOutputManager.Create (which creates the render context),
     // and mpv ignores runtime changes to gpu-hwdec-interop.
-    unawaited(_disableRenderHwdecInterop(nextPlayer));
+    unawaited(_configureRenderHwdecInterop(nextPlayer));
     final nextVideoController = VideoController(
       nextPlayer,
       configuration: const VideoControllerConfiguration(
@@ -403,6 +403,10 @@ class PlaybackController extends ChangeNotifier {
         // The copy path crops to the visible size during readback, fixing e.g.
         // the HLS + WebVTT HEVC channels. Zero-copy also crashed the native
         // process for some IPTV codecs/resolutions in the past.
+        //
+        // This stays the default for every stream. Frames too large to afford
+        // the readback are switched to zero-copy at runtime instead, once their
+        // real size is known — see [_applyHwdecForFrameSize].
         hwdec: 'auto-copy',
         enableHardwareAcceleration: true,
       ),
@@ -410,16 +414,20 @@ class PlaybackController extends ChangeNotifier {
     return (nextPlayer, nextVideoController);
   }
 
-  /// Blocks hwdec-interop loading in the libmpv render context. The libmpv
-  /// render API (media_kit's video path) has no on-demand interop loading, so
-  /// the default `gpu-hwdec-interop=auto` behaves like `all`: every interop is
-  /// loaded eagerly when the render context is created. The `dxva2-egl`
-  /// interop then fails to init on ANGLE's D3D11 backend and logs
+  /// Loads exactly one hwdec interop into the libmpv render context: the
+  /// `d3d11-egl` one that actually works on ANGLE.
+  ///
+  /// The libmpv render API (media_kit's video path) has no on-demand interop
+  /// loading, so the default `gpu-hwdec-interop=auto` behaves like `all`: every
+  /// interop is loaded eagerly when the render context is created. The
+  /// `dxva2-egl` interop then fails to init on ANGLE's D3D11 backend and logs
   /// "[mpv:error] libmpv_render/dxva2-egl: Failed to create EGL surface" on
-  /// every engine (re)creation, i.e. every channel switch. Since `hwdec` is
-  /// pinned to `auto-copy` (decode + readback, see _createPlaybackEngine), no
-  /// GPU interop is ever used, so loading none is safe and also skips the
-  /// pointless probing work.
+  /// every engine (re)creation, i.e. every channel switch.
+  ///
+  /// That noise used to be silenced with `no`, which also made zero-copy
+  /// decoding impossible for every stream. Naming the single working interop
+  /// keeps the log clean and still leaves `hwdec=d3d11va` available for frames
+  /// too large to survive a readback (see [_applyHwdecForFrameSize]).
   ///
   /// Timing is critical: mpv reads this option only once, when the render
   /// context is created inside VideoOutputManager.Create. A plain
@@ -428,19 +436,94 @@ class PlaybackController extends ChangeNotifier {
   /// waits for the raw mpv handle instead and writes the property directly.
   /// The VideoController's own create flow waits for a post-frame callback and
   /// a decoder query first, so this always lands in time.
-  Future<void> _disableRenderHwdecInterop(Player target) async {
+  Future<void> _configureRenderHwdecInterop(Player target) async {
     try {
       await target.handle;
       final platform = target.platform;
       if (platform == null) return;
-      await (platform as dynamic).setProperty(
-        'gpu-hwdec-interop',
-        'no',
-        waitForInitialization: false,
-      );
+      // Interop names come from the libmpv build, so fall back to letting mpv
+      // decide rather than leaving the property unset if this build spells it
+      // differently. `auto` costs the dxva2-egl log noise but stays functional.
+      for (final value in const ['d3d11-egl', 'auto']) {
+        try {
+          await (platform as dynamic).setProperty(
+            'gpu-hwdec-interop',
+            value,
+            waitForInitialization: false,
+          );
+          debugPrint('Applied gpu-hwdec-interop=$value');
+          return;
+        } catch (error) {
+          debugPrint('gpu-hwdec-interop=$value rejected: $error');
+        }
+      }
     } catch (e) {
       debugPrint('Failed to set gpu-hwdec-interop: $e');
     }
+  }
+
+  // Above this many pixels a decoded frame can no longer afford hwdec's
+  // GPU->CPU readback. One 8K 10-bit frame is ~95 MiB, so 59.94 fps needs
+  // ~5.6 GiB/s down plus the same again back up into the shared texture.
+  // Measured with 8K HEVC Main10 on this class of GPU: ~95 fps while frames stay
+  // on the GPU, collapsing to ~20 fps once the readback is added. 4K and below
+  // stay on the proven copy path, so only streams that are unwatchable today
+  // change behaviour.
+  static const int _zeroCopyPixelThreshold = 3840 * 2160;
+
+  // Interpolation and display-resample cost scales with pixel count. Past this
+  // size they cost far more than they can return, and a container that
+  // misreports a low `container-fps` (MMT/TLV among others) would otherwise
+  // switch them on for an 8K stream and ruin an otherwise-smooth pipeline.
+  static const int _interpolationPixelLimit = 2560 * 1440;
+
+  bool _zeroCopyHwdecApplied = false;
+
+  int get _decodedPixels {
+    final width = videoParams.dw ?? videoParams.w ?? 0;
+    final height = videoParams.dh ?? videoParams.h ?? 0;
+    return width * height;
+  }
+
+  /// Switches very large frames to zero-copy decoding once mpv reports their
+  /// real size. Called for every `videoParams` update and applied at most once
+  /// per open (reset in [_applyPlaybackOptions]).
+  Future<void> _applyHwdecForFrameSize() async {
+    if (_zeroCopyHwdecApplied || _disposed) return;
+    if (_decodedPixels <= _zeroCopyPixelThreshold) return;
+    final platform = hasPlaybackEngine ? player.platform : null;
+    // Claim the one-shot only once there is something to write to, so an engine
+    // swap racing the first frame does not consume it.
+    if (platform == null) return;
+    _zeroCopyHwdecApplied = true;
+    final size =
+        '${videoParams.dw ?? videoParams.w}x${videoParams.dh ?? videoParams.h}';
+    // A comma-separated list is walked in order by mpv, so a build or driver
+    // that cannot map d3d11va into the render context falls back to the copy
+    // path instead of dropping all the way to software decoding. Older builds
+    // take only a single method, hence the second candidate.
+    for (final value in const ['d3d11va,auto-copy', 'd3d11va']) {
+      try {
+        await (platform as dynamic).setProperty('hwdec', value);
+        DebugLogService.instance.add(
+          'Zero-copy decoding requested for $size (hwdec=$value)',
+          source: 'app',
+        );
+        // Which method actually took effect is NOT read back here: writing
+        // `hwdec` tears down and rebuilds the decoder, and `hwdec-current`
+        // returns an empty string while that is in flight. The once-a-second
+        // poll reports it instead, and also catches a later fallback (see
+        // _pollBitrate).
+        return;
+      } catch (error) {
+        debugPrint('hwdec=$value rejected: $error');
+      }
+    }
+    DebugLogService.instance.add(
+      'Zero-copy decoding unavailable for $size, staying on hwdec=auto-copy',
+      level: DebugLogLevel.warn,
+      source: 'app',
+    );
   }
 
   void _handleDashSubtitleCues(List<DashSubtitleCue> cues) {
@@ -686,6 +769,9 @@ class PlaybackController extends ChangeNotifier {
     _videoParamsSubscription = player.stream.videoParams.listen((params) {
       if (_disposed) return;
       videoParams = params;
+      // The real frame size only becomes known here, and it decides whether the
+      // readback in the default copy-based hwdec path is affordable at all.
+      unawaited(_applyHwdecForFrameSize());
       _refreshSubtitleTracks(player.state.tracks.subtitle);
       notifyListeners();
       // Real decoded dimensions are proof the stream actually started (unlike
@@ -1034,6 +1120,23 @@ class PlaybackController extends ChangeNotifier {
       final parsedFps = fpsValue == null ? null : double.tryParse(fpsValue);
       videoBitrate = parsedBitrate;
       containerFps = parsedFps;
+      // Report the decoder actually in use whenever it changes. This is the
+      // only reliable place to observe it: `hwdec-current` reads back empty
+      // while a decoder reinit is in flight, so the write in
+      // _applyHwdecForFrameSize cannot confirm its own result. Logging every
+      // transition also surfaces a fallback that happens later in a stream.
+      if (hwdecValue != null &&
+          hwdecValue.isNotEmpty &&
+          hwdecValue != hwdecCurrent) {
+        final resolution = _decodedPixels > 0
+            ? ' at ${videoParams.dw ?? videoParams.w}x'
+                  '${videoParams.dh ?? videoParams.h}'
+            : '';
+        DebugLogService.instance.add(
+          'Decoder: hwdec-current=$hwdecValue$resolution',
+          source: 'app',
+        );
+      }
       hwdecCurrent = hwdecValue;
       notifyListeners();
       // Once mpv reports the real source frame rate, decide interpolation
@@ -1947,10 +2050,13 @@ class PlaybackController extends ChangeNotifier {
     // is known (see _applyInterpolationForFps). Interpolation + display-resample
     // are very expensive at 4K60 and noticeably delay first frame.
     _interpolationConfigured = false;
+    _zeroCopyHwdecApplied = false;
     final options = {
       // Keep in sync with VideoControllerConfiguration.hwdec: the zero-copy
       // path leaks HEVC decoder padding as a black bottom/left bar (see
-      // _createPlaybackEngine).
+      // _createPlaybackEngine). Frames above _zeroCopyPixelThreshold override
+      // this once their size is known (see _applyHwdecForFrameSize), so this
+      // also restores the copy path when switching back to a normal stream.
       'hwdec': 'auto-copy',
       'interpolation': 'no',
       'video-sync': 'audio',
@@ -1992,8 +2098,14 @@ class PlaybackController extends ChangeNotifier {
       'keep-open': 'yes',
       // Keep enough read-ahead to absorb normal CDN jitter without retaining
       // a minute of demuxed packets for every live stream.
+      //
+      // `demuxer-max-bytes` is a ceiling, not a preallocation: `readahead-secs`
+      // decides how much is actually held, so a low-bitrate channel still uses
+      // only a few MiB. The previous 32 MiB ceiling silently capped read-ahead
+      // at ~7s for a 35 Mbps stream (8K MMT/TLV), well short of the 20s asked
+      // for above, leaving no cushion when the pipeline briefly falls behind.
       'demuxer-readahead-secs': '20',
-      'demuxer-max-bytes': (32 * 1024 * 1024).toString(),
+      'demuxer-max-bytes': (96 * 1024 * 1024).toString(),
       // We buffer entirely in memory (the demuxer cache above plus our own
       // producer queue), so stop mpv trying to spill the cache to a disk file
       // — that attempt just fails with "lavf: Failed to create file cache".
@@ -2061,7 +2173,14 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _applyInterpolationForFps(double fps) async {
     final platform = player.platform;
     if (platform == null) return;
-    final enable = !_activeIsAv3a && fps > 0 && fps < 40;
+    // A frame size of 0 means mpv has not reported one yet (audio-only streams
+    // never do), which keeps the original fps-only behaviour for those.
+    final pixels = _decodedPixels;
+    final enable =
+        !_activeIsAv3a &&
+        fps > 0 &&
+        fps < 40 &&
+        pixels <= _interpolationPixelLimit;
     try {
       await (platform as dynamic).setProperty(
         'video-sync',
