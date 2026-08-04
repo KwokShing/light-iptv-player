@@ -1132,10 +1132,9 @@ class PlaybackController extends ChangeNotifier {
             ? ' at ${videoParams.dw ?? videoParams.w}x'
                   '${videoParams.dh ?? videoParams.h}'
             : '';
-        DebugLogService.instance.add(
-          'Decoder: hwdec-current=$hwdecValue$resolution',
-          source: 'app',
-        );
+        final message = 'Decoder: hwdec-current=$hwdecValue$resolution';
+        debugPrint(message);
+        DebugLogService.instance.add(message, source: 'app');
       }
       hwdecCurrent = hwdecValue;
       notifyListeners();
@@ -2140,11 +2139,10 @@ class PlaybackController extends ChangeNotifier {
       }
     }
 
-    try {
-      final current =
-          await (platform as dynamic).getProperty('hwdec-current') as String?;
-      debugPrint('After apply: hwdec-current=$current');
-    } catch (_) {}
+    // `hwdec-current` is deliberately NOT read back here. This runs before
+    // `player.open()`, so no video chain exists yet and mpv has no current
+    // decoder to report: the read always yielded an empty string. The effective
+    // decoder is logged by _pollBitrate once playback is actually running.
 
     await _applyDeinterlaceFilter();
   }
