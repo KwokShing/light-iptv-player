@@ -206,6 +206,9 @@ class PlaybackController extends ChangeNotifier {
   int? videoBitrate;
   double? containerFps;
   String? hwdecCurrent;
+  // Last decoder written to the log, so the same one is not reported again when
+  // `hwdec-current` briefly reads back empty.
+  String? _loggedHwdecCurrent;
   bool _interpolationConfigured = false;
   bool _bitratePollInFlight = false;
   // Per-channel deinterlace toggle. Starts OFF for every stream and is reset
@@ -406,7 +409,7 @@ class PlaybackController extends ChangeNotifier {
         //
         // This stays the default for every stream. Frames too large to afford
         // the readback are switched to zero-copy at runtime instead, once their
-        // real size is known — see [_applyHwdecForFrameSize].
+        // real size is known — see [_applyLargeFrameTuning].
         hwdec: 'auto-copy',
         enableHardwareAcceleration: true,
       ),
@@ -427,7 +430,7 @@ class PlaybackController extends ChangeNotifier {
   /// That noise used to be silenced with `no`, which also made zero-copy
   /// decoding impossible for every stream. Naming the single working interop
   /// keeps the log clean and still leaves `hwdec=d3d11va` available for frames
-  /// too large to survive a readback (see [_applyHwdecForFrameSize]).
+  /// too large to survive a readback (see [_applyLargeFrameTuning]).
   ///
   /// Timing is critical: mpv reads this option only once, when the render
   /// context is created inside VideoOutputManager.Create. A plain
@@ -477,7 +480,17 @@ class PlaybackController extends ChangeNotifier {
   // switch them on for an 8K stream and ruin an otherwise-smooth pipeline.
   static const int _interpolationPixelLimit = 2560 * 1440;
 
-  bool _zeroCopyHwdecApplied = false;
+  // Ceiling for the texture handed to Flutter. mpv scales into it on the GPU,
+  // so the stream still decodes at full resolution, but everything downstream —
+  // the render pass, the DXGI shared surface, and Flutter's own per-frame
+  // sampling — shrinks with the square of the ratio. An 8K frame is a 132 MiB
+  // BGRA texture that no display can show and that the player pane draws into a
+  // few hundred pixels; capping at 4K cuts that fourfold. It also shortens the
+  // render pass that the engine-teardown deadlock in [play] races against.
+  static const int _maxTextureWidth = 3840;
+  static const int _maxTextureHeight = 2160;
+
+  bool _largeFrameTuningApplied = false;
 
   int get _decodedPixels {
     final width = videoParams.dw ?? videoParams.w ?? 0;
@@ -485,19 +498,53 @@ class PlaybackController extends ChangeNotifier {
     return width * height;
   }
 
-  /// Switches very large frames to zero-copy decoding once mpv reports their
-  /// real size. Called for every `videoParams` update and applied at most once
-  /// per open (reset in [_applyPlaybackOptions]).
-  Future<void> _applyHwdecForFrameSize() async {
-    if (_zeroCopyHwdecApplied || _disposed) return;
-    if (_decodedPixels <= _zeroCopyPixelThreshold) return;
+  /// Applies the tuning only very large frames need, once mpv reports the real
+  /// frame size: zero-copy decoding, plus a bound on the texture size. Called
+  /// for every `videoParams` update, applied at most once per open (reset in
+  /// [_applyPlaybackOptions]).
+  Future<void> _applyLargeFrameTuning() async {
+    if (_largeFrameTuningApplied || _disposed) return;
+    final width = videoParams.dw ?? videoParams.w ?? 0;
+    final height = videoParams.dh ?? videoParams.h ?? 0;
+    if (width <= 0 || height <= 0) return;
+    if (width * height <= _zeroCopyPixelThreshold) return;
     final platform = hasPlaybackEngine ? player.platform : null;
     // Claim the one-shot only once there is something to write to, so an engine
     // swap racing the first frame does not consume it.
     if (platform == null) return;
-    _zeroCopyHwdecApplied = true;
-    final size =
-        '${videoParams.dw ?? videoParams.w}x${videoParams.dh ?? videoParams.h}';
+    _largeFrameTuningApplied = true;
+    await _capTextureSize(width, height);
+    if (_disposed) return;
+    await _enableZeroCopyHwdec(platform, '${width}x$height');
+  }
+
+  /// Pins the render surface to at most 4K, preserving the source aspect ratio
+  /// so mpv does not letterbox inside the texture.
+  Future<void> _capTextureSize(int width, int height) async {
+    if (width <= _maxTextureWidth && height <= _maxTextureHeight) return;
+    final widthRatio = _maxTextureWidth / width;
+    final heightRatio = _maxTextureHeight / height;
+    final scale = widthRatio < heightRatio ? widthRatio : heightRatio;
+    // Even dimensions keep chroma subsampling happy.
+    final cappedWidth = (width * scale).round() & ~1;
+    final cappedHeight = (height * scale).round() & ~1;
+    if (cappedWidth <= 0 || cappedHeight <= 0) return;
+    try {
+      await videoController.setSize(
+        width: cappedWidth,
+        height: cappedHeight,
+      );
+      DebugLogService.instance.add(
+        'Render surface capped to ${cappedWidth}x$cappedHeight '
+        'for ${width}x$height source',
+        source: 'app',
+      );
+    } catch (error) {
+      debugPrint('Failed to cap render surface: $error');
+    }
+  }
+
+  Future<void> _enableZeroCopyHwdec(Object platform, String size) async {
     // A comma-separated list is walked in order by mpv, so a build or driver
     // that cannot map d3d11va into the render context falls back to the copy
     // path instead of dropping all the way to software decoding. Older builds
@@ -771,7 +818,7 @@ class PlaybackController extends ChangeNotifier {
       videoParams = params;
       // The real frame size only becomes known here, and it decides whether the
       // readback in the default copy-based hwdec path is affordable at all.
-      unawaited(_applyHwdecForFrameSize());
+      unawaited(_applyLargeFrameTuning());
       _refreshSubtitleTracks(player.state.tracks.subtitle);
       notifyListeners();
       // Real decoded dimensions are proof the stream actually started (unlike
@@ -1123,11 +1170,16 @@ class PlaybackController extends ChangeNotifier {
       // Report the decoder actually in use whenever it changes. This is the
       // only reliable place to observe it: `hwdec-current` reads back empty
       // while a decoder reinit is in flight, so the write in
-      // _applyHwdecForFrameSize cannot confirm its own result. Logging every
+      // _applyLargeFrameTuning cannot confirm its own result. Logging every
       // transition also surfaces a fallback that happens later in a stream.
+      // Compared against the last *logged* value, not against `hwdecCurrent`:
+      // the property reads back empty while a decoder reinit is in flight, and
+      // comparing against the stored value would re-log the same decoder every
+      // time it flapped through empty.
       if (hwdecValue != null &&
           hwdecValue.isNotEmpty &&
-          hwdecValue != hwdecCurrent) {
+          hwdecValue != _loggedHwdecCurrent) {
+        _loggedHwdecCurrent = hwdecValue;
         final resolution = _decodedPixels > 0
             ? ' at ${videoParams.dw ?? videoParams.w}x'
                   '${videoParams.dh ?? videoParams.h}'
@@ -1517,6 +1569,7 @@ class PlaybackController extends ChangeNotifier {
     );
     nowPlaying = channel;
     videoParams = const VideoParams();
+    _loggedHwdecCurrent = null;
     selectedTrack = const Track();
     subtitlesEnabled = true;
     subtitleTracks = const [];
@@ -1533,6 +1586,19 @@ class PlaybackController extends ChangeNotifier {
       source: 'app',
     );
     if (needsEngineSwap) {
+      // Quiesce the render loop before tearing the engine down. media_kit's
+      // VideoOutput destructor blocks the platform thread until the raster
+      // thread runs its texture-unregister callback, and that callback contends
+      // for the same mutex as an in-flight Render(). A render pass over a
+      // 7680x4320 FBO is slow enough to lose that race, which deadlocks the
+      // platform thread and freezes the whole app. Unloading the file first
+      // stops new frames from being produced, so nothing is mid-render.
+      try {
+        await player.stop();
+      } catch (error) {
+        debugPrint('Stop before engine swap failed: $error');
+      }
+      if (_disposed || request != playbackRequest) return;
       await _recreateEngine();
     } else {
       await player.stop();
@@ -1865,13 +1931,25 @@ class PlaybackController extends ChangeNotifier {
     streamUrlController.clear();
     // Returning home releases libmpv without replacing it; the transport Stop
     // button keeps a blank engine because PlayerPage remains visible there.
-    if (releaseEngine) {
-      await _releaseEngine();
-    } else if (_engineReleased) {
+    if (_engineReleased) {
       // Nothing native remains to stop. This occurs when callers defensively
       // stop playback before opening a source from the home page.
-    } else if (_engineDirty) {
-      await _swapEngine();
+    } else if (releaseEngine || _engineDirty) {
+      // Unload before destroying or replacing the engine, for the same reason
+      // as in [play]: tearing down media_kit's VideoOutput blocks the platform
+      // thread on the raster thread, which can deadlock against a render pass
+      // that is still in flight over a very large frame.
+      try {
+        await player.stop();
+      } catch (error) {
+        debugPrint('Stop before engine teardown failed: $error');
+      }
+      if (_disposed) return;
+      if (releaseEngine) {
+        await _releaseEngine();
+      } else {
+        await _swapEngine();
+      }
     } else {
       try {
         await player.stop();
@@ -2049,12 +2127,12 @@ class PlaybackController extends ChangeNotifier {
     // is known (see _applyInterpolationForFps). Interpolation + display-resample
     // are very expensive at 4K60 and noticeably delay first frame.
     _interpolationConfigured = false;
-    _zeroCopyHwdecApplied = false;
+    _largeFrameTuningApplied = false;
     final options = {
       // Keep in sync with VideoControllerConfiguration.hwdec: the zero-copy
       // path leaks HEVC decoder padding as a black bottom/left bar (see
       // _createPlaybackEngine). Frames above _zeroCopyPixelThreshold override
-      // this once their size is known (see _applyHwdecForFrameSize), so this
+      // this once their size is known (see _applyLargeFrameTuning), so this
       // also restores the copy path when switching back to a normal stream.
       'hwdec': 'auto-copy',
       'interpolation': 'no',
