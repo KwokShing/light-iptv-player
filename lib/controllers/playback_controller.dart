@@ -112,6 +112,10 @@ class PlaybackController extends ChangeNotifier {
   List<DashTtmlTrack> _dashTtmlTracks = const [];
   String? _pendingDefaultSubtitleId;
   String? _autoSelectedSubtitleId;
+  // Ids of the subtitle tracks mpv reported but cannot decode, and the one we
+  // have already switched off, so it is only done once per stream.
+  Set<String> _undecodableSubtitleIds = const {};
+  String? _disabledUndecodableSubtitleId;
 
   /// Marks a [SubtitleTrack] in [subtitleTracks] as a DASH TTML track rendered
   /// by Flutter rather than one libmpv can select.
@@ -654,12 +658,31 @@ class PlaybackController extends ChangeNotifier {
     return true;
   }
 
+  // Subtitle codecs the bundled libmpv has no decoder for. Selecting one makes
+  // mpv log "sub/ass: Could not open libavcodec subtitle converter" at fatal
+  // level and then fail every subtitle packet, while never drawing anything.
+  // ARIB MMT/TLV broadcasts carry their captions as TTML, so an 8K channel would
+  // otherwise have its unusable track auto-selected on every open. (DASH TTML is
+  // unaffected: those tracks never reach libmpv, they are parsed in Dart and
+  // drawn by Flutter — see [_handleDashTtmlTracks].)
+  static const Set<String> _undecodableSubtitleCodecs = {'ttml'};
+
+  bool _isUndecodableSubtitle(SubtitleTrack track) {
+    final codec = track.codec?.trim().toLowerCase();
+    return codec != null && _undecodableSubtitleCodecs.contains(codec);
+  }
+
   bool _refreshSubtitleTracks(Iterable<SubtitleTrack> tracks) {
-    final next = tracks
-        .where((track) {
-          final id = track.id.toLowerCase();
-          return id != 'auto' && id != 'no';
-        })
+    final real = tracks.where((track) {
+      final id = track.id.toLowerCase();
+      return id != 'auto' && id != 'no';
+    });
+    _undecodableSubtitleIds = {
+      for (final track in real)
+        if (_isUndecodableSubtitle(track)) track.id,
+    };
+    final next = real
+        .where((track) => !_isUndecodableSubtitle(track))
         .toList(growable: false);
     if (!_sameTrackIds(_nativeSubtitleTracks, next)) {
       _nativeSubtitleTracks = List<SubtitleTrack>.unmodifiable(next);
@@ -693,7 +716,15 @@ class PlaybackController extends ChangeNotifier {
   /// off; picking the first real track keeps the app's "subtitles on for every
   /// video" behaviour deterministic.
   void _autoSelectSubtitle() {
-    if (!subtitlesEnabled || nowPlaying == null) return;
+    if (nowPlaying == null) return;
+    // mpv's own default selector, and the `auto` fallback below, will happily
+    // land on a track it has no decoder for. Turn it off explicitly rather than
+    // leaving it selected and failing every packet.
+    if (_undecodableSubtitleIds.contains(selectedTrack.subtitle.id)) {
+      unawaited(_disableUndecodableSubtitle(selectedTrack.subtitle));
+      return;
+    }
+    if (!subtitlesEnabled) return;
     if (_nativeSubtitleTracks.isEmpty) return;
     // A TTML track the viewer chose stays put. One the DASH pipeline started by
     // default gives way to a native track, since libmpv renders that itself and
@@ -712,6 +743,23 @@ class PlaybackController extends ChangeNotifier {
     if (_autoSelectedSubtitleId == first.id) return;
     _autoSelectedSubtitleId = first.id;
     unawaited(_selectDiscoveredSubtitle(first));
+  }
+
+  Future<void> _disableUndecodableSubtitle(SubtitleTrack track) async {
+    if (_disabledUndecodableSubtitleId == track.id) return;
+    _disabledUndecodableSubtitleId = track.id;
+    DebugLogService.instance.add(
+      'Subtitle track ${track.id} uses ${track.codec}, which this libmpv '
+      'cannot decode; turning it off',
+      level: DebugLogLevel.warn,
+      source: 'app',
+    );
+    if (!hasPlaybackEngine || nowPlaying == null) return;
+    try {
+      await player.setSubtitleTrack(SubtitleTrack.no());
+    } catch (error) {
+      debugPrint('Failed to turn off undecodable subtitle: $error');
+    }
   }
 
   /// Points the DASH pipeline at [id] (or stops TTML downloads when null) and
@@ -1136,6 +1184,49 @@ class PlaybackController extends ChangeNotifier {
     lastFrame = null;
   }
 
+  // Dropped-frame counters as of the last report, and when that report was
+  // made. Rate-limited because these only matter as a trend.
+  int _reportedDecoderDrops = 0;
+  int _reportedOutputDrops = 0;
+  DateTime? _lastDropReport;
+  static const Duration _dropReportInterval = Duration(seconds: 5);
+
+  void _resetFrameDropReporting() {
+    _reportedDecoderDrops = 0;
+    _reportedOutputDrops = 0;
+    _lastDropReport = null;
+  }
+
+  /// Logs how many frames are being lost, and where. Silent while nothing is
+  /// dropping, so a healthy stream produces no output at all.
+  void _reportFrameDrops(int decoderDrops, int outputDrops) {
+    if (decoderDrops == _reportedDecoderDrops &&
+        outputDrops == _reportedOutputDrops) {
+      return;
+    }
+    final now = DateTime.now();
+    final last = _lastDropReport;
+    if (last != null && now.difference(last) < _dropReportInterval) return;
+    final decoderDelta = decoderDrops - _reportedDecoderDrops;
+    final outputDelta = outputDrops - _reportedOutputDrops;
+    final elapsed = last == null
+        ? _dropReportInterval
+        : now.difference(last);
+    _reportedDecoderDrops = decoderDrops;
+    _reportedOutputDrops = outputDrops;
+    _lastDropReport = now;
+    if (decoderDelta <= 0 && outputDelta <= 0) return;
+    final perSecond = (decoderDelta + outputDelta) / elapsed.inMilliseconds
+        * 1000;
+    DebugLogService.instance.add(
+      'Dropping ${perSecond.toStringAsFixed(1)} frames/s '
+      '(decoder +$decoderDelta, output +$outputDelta; '
+      'totals $decoderDrops / $outputDrops)',
+      level: DebugLogLevel.warn,
+      source: 'app',
+    );
+  }
+
   Future<void> _pollBitrate() async {
     if (_bitratePollInFlight ||
         _disposed ||
@@ -1156,6 +1247,17 @@ class PlaybackController extends ChangeNotifier {
           await (platform as dynamic).getProperty('container-fps') as String?;
       final hwdecValue =
           await (platform as dynamic).getProperty('hwdec-current') as String?;
+      // Frames lost before they ever reached the screen. `decoder-frame-drop-count`
+      // counts pictures the decoder itself threw away (corrupt or undecodable
+      // input); `frame-drop-count` counts frames the output stage dropped for
+      // being late. Together they separate a broken bitstream from a pipeline
+      // that simply cannot keep up.
+      final decoderDropsValue =
+          await (platform as dynamic).getProperty('decoder-frame-drop-count')
+              as String?;
+      final outputDropsValue =
+          await (platform as dynamic).getProperty('frame-drop-count')
+              as String?;
       if (_disposed ||
           generation != _engineGeneration ||
           !identical(polledPlayer, _player)) {
@@ -1189,6 +1291,10 @@ class PlaybackController extends ChangeNotifier {
         DebugLogService.instance.add(message, source: 'app');
       }
       hwdecCurrent = hwdecValue;
+      _reportFrameDrops(
+        int.tryParse(decoderDropsValue ?? '') ?? 0,
+        int.tryParse(outputDropsValue ?? '') ?? 0,
+      );
       notifyListeners();
       // Once mpv reports the real source frame rate, decide interpolation
       // automatically (one time per stream).
@@ -1492,6 +1598,10 @@ class PlaybackController extends ChangeNotifier {
             ? SubtitleTrack.no()
             : _nativeSubtitleTracks.isNotEmpty
             ? _nativeSubtitleTracks.first
+            // `auto` lets mpv pick, which includes tracks it cannot decode. If
+            // the only ones on offer are undecodable, leave subtitles off.
+            : _undecodableSubtitleIds.isNotEmpty
+            ? SubtitleTrack.no()
             : SubtitleTrack.auto(),
       );
     } catch (error) {
@@ -1576,6 +1686,9 @@ class PlaybackController extends ChangeNotifier {
     _nativeSubtitleTracks = const [];
     _pendingDefaultSubtitleId = null;
     _autoSelectedSubtitleId = null;
+    _undecodableSubtitleIds = const {};
+    _disabledUndecodableSubtitleId = null;
+    _resetFrameDropReporting();
     _resetDashSubtitleFallback();
     position = Duration.zero;
     duration = Duration.zero;
@@ -1964,6 +2077,7 @@ class PlaybackController extends ChangeNotifier {
     videoBitrate = null;
     containerFps = null;
     hwdecCurrent = null;
+    _resetFrameDropReporting();
     fullscreen = false;
     position = Duration.zero;
     duration = Duration.zero;
