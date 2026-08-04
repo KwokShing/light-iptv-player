@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:light_iptv_player/constants.dart';
 import 'package:light_iptv_player/controllers/sources_controller.dart';
 import 'package:light_iptv_player/dash/dash_c.dart';
+import 'package:light_iptv_player/services/debug_log_service.dart';
 import 'package:light_iptv_player/dash/dash_manifest_parser.dart';
 import 'package:light_iptv_player/models/epg.dart';
 import 'package:light_iptv_player/models/playlist.dart';
@@ -397,6 +398,67 @@ https://example.com/drm.mpd
           .toList();
 
       expect(languages, ['eng', 'jpn']);
+    });
+  });
+
+  group('DebugLogService', () {
+    final log = DebugLogService.instance;
+
+    setUp(log.clear);
+    tearDown(log.clear);
+
+    test('collapses an immediately repeated line into a counter', () {
+      for (var i = 0; i < 500; i++) {
+        log.add('ffmpeg/demuxer: Packet corrupt', source: 'mpv');
+      }
+      expect(log.entries.length, 1);
+      expect(log.entries.single.repeats, 500);
+    });
+
+    test('keeps distinct lines as separate entries', () {
+      log.add('first');
+      log.add('second');
+      log.add('first');
+      expect(log.entries.map((entry) => entry.message), [
+        'first',
+        'second',
+        'first',
+      ]);
+      expect(log.entries.every((entry) => entry.repeats == 1), isTrue);
+    });
+
+    test('a repeated line does not evict earlier ones', () {
+      log.add('Decoder: hwdec-current=d3d11va');
+      for (var i = 0; i < 100000; i++) {
+        log.add('noise', source: 'mpv');
+      }
+      expect(log.entries.first.message, 'Decoder: hwdec-current=d3d11va');
+      expect(log.entries.length, 2);
+    });
+
+    test('trims back to the cap once the slack is exceeded', () {
+      for (var i = 0; i < 4000; i++) {
+        log.add('line $i');
+      }
+      expect(log.entries.length, lessThanOrEqualTo(2000 + 256));
+      expect(log.entries.last.message, 'line 3999');
+      // The oldest lines are the ones dropped.
+      expect(log.entries.first.message, isNot('line 0'));
+    });
+
+    test('coalesces a burst into a single notification', () async {
+      var notifications = 0;
+      void listener() => notifications++;
+      log.addListener(listener);
+      addTearDown(() => log.removeListener(listener));
+
+      for (var i = 0; i < 200; i++) {
+        log.add('line $i');
+      }
+      expect(notifications, 0, reason: 'notification is deferred');
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(notifications, 1);
+      expect(log.entries.length, 200);
     });
   });
 }

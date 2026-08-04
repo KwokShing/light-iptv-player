@@ -235,6 +235,18 @@ class _LogRow extends StatelessWidget {
                   ),
                 ),
               ),
+              if (entry.repeats > 1) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '×${entry.repeats}',
+                  style: const TextStyle(
+                    color: AppColors.textMuted,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w800,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 4),
